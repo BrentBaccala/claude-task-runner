@@ -2412,7 +2412,7 @@ def main():
     elif args.backup:
         # Export sessions, commit, and push to backup remote
         print("Running export_sessions.py...")
-        rc = subprocess.run([sys.executable, os.path.join(PROJECT_DIR, "export_sessions.py")]).returncode
+        rc = subprocess.run([sys.executable, os.path.join(SCRIPT_DIR, "export_sessions.py")], cwd=PROJECT_DIR).returncode
         if rc != 0:
             print("Warning: export_sessions.py exited with errors")
         # Stage and commit
