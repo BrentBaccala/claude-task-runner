@@ -18,27 +18,27 @@ supports iterative debug/fix loops.
 - **Live monitoring** — tail running task output in real-time
 - **Backup** — export sessions and push to a backup remote in one command
 
-## Quick Start
+## Getting Started
+
+Clone this repo into your project directory:
 
 ```bash
-# Initialize the database
-python3 init_db.py
-
-# Write a task prompt
-cat > prompts/my-task << 'EOF'
-Build the project and run the test suite.
-Report results as TASK_RESULT: SUCCESS N/M or TASK_RESULT: FAILURE N/M.
-EOF
-
-# Create and run the task
-python3 task_runner.py --create my-task --agent coder
-python3 task_runner.py --run my-task
-
-# Monitor and view results
-python3 task_runner.py --tail my-task    # live output
-python3 task_runner.py --show my-task    # formatted results
-python3 task_runner.py --show my-task -v # with tool calls
+git clone https://github.com/BrentBaccworka/claude-task-runner ~/project
+cd ~/project
 ```
+
+Then ask Claude Code to create and run tasks for you:
+
+> "Create a task to build the project and run the test suite"
+
+> "Create a task to review the code in src/ for security issues"
+
+> "Show me what task 5 did"
+
+> "Continue task 12 — try a different approach for the failing test"
+
+Claude reads `CLAUDE.md` and knows how to use the task runner. You direct,
+Claude executes. See `CLAUDE.md` for the full reference that Claude uses.
 
 ## Files
 
@@ -140,6 +140,32 @@ The task runner parses this to determine success/failure and track progress.
 | `explorer` | opus | Codebase exploration |
 | `documenter` | opus | Documentation |
 | `sonnet` | sonnet | Cheaper/faster tasks |
+
+## Optional: Redirect Plan Mode
+
+If you want Claude's plan mode to create tasks instead of "clear context and
+implement", add a PreToolUse hook to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "EnterPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'BLOCKED: Do not use plan mode. Instead, write the plan to prompts/NAME and run: python3 task_runner.py --create NAME --agent TYPE --hold-on-create' >&2; exit 2"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+This puts plans into the task runner where they can be reviewed, edited, and
+run on demand — rather than immediately clearing context and implementing.
 
 ## Requirements
 
