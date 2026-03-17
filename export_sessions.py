@@ -216,6 +216,21 @@ def main():
         fname = safe_filename(fname) + ".jsonl"
         dest = os.path.join(target_dir, fname)
 
+        # Remove any existing link to this source under a different name (rename).
+        # Only rename if the new destination is available (not taken by another session).
+        src_ino = os.stat(src).st_ino
+        dest_available = not os.path.exists(dest) or os.stat(dest).st_ino == src_ino
+        for existing in os.listdir(target_dir):
+            existing_path = os.path.join(target_dir, existing)
+            if os.path.isfile(existing_path) and os.stat(existing_path).st_ino == src_ino:
+                if existing_path == dest:
+                    break  # already linked with the right name
+                elif dest_available:
+                    if not dry_run:
+                        os.unlink(existing_path)
+                    print(f"  rename {existing} -> {fname}")
+                break
+
         # Check if link already exists and points to the same file
         if os.path.exists(dest):
             if os.path.samefile(src, dest):
