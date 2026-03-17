@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+tasks.db
+logs/
+prompts/
+docs/
+progress-reports/
+sessions/
+plan-sessions/
+memory/

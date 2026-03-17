@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -n \"$CLAUDE_ENV_FILE\" ]; then for var in TASK_LIVE_LOG BASH_DEFAULT_TIMEOUT_MS BASH_MAX_TIMEOUT_MS; do eval val=\\$$var; if [ -n \"$val\" ]; then echo \"export $var=\\\"$val\\\"\" >> \"$CLAUDE_ENV_FILE\"; fi; done; fi; exit 0"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -e '(.tool_input.run_in_background // false) | not' > /dev/null || (echo 'Do not run commands in background. Run them synchronously so output can be monitored.' >&2; exit 2)"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -e '(.tool_input.run_in_background // false) | not' > /dev/null || (echo 'Reminder: do NOT write TASK_RESULT until all background agents have completed.' >&2; exit 0)"
+          }
+        ]
+      }
+    ]
+  }
+}
