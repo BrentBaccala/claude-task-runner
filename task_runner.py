@@ -46,7 +46,8 @@ import textwrap
 import threading
 from datetime import datetime
 
-PROJECT_DIR = os.path.dirname(os.path.realpath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+PROJECT_DIR = os.getcwd()
 DB_PATH = os.path.join(PROJECT_DIR, 'tasks.db')
 LOGS_DIR = os.path.join(PROJECT_DIR, 'logs')
 CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
@@ -1723,7 +1724,7 @@ def run_task(db, task):
 
     # Build the Claude Code command
     model = AGENT_MODELS.get(task["agent_type"], "opus")
-    agent_settings = os.path.join(PROJECT_DIR, "agent-settings.json")
+    agent_settings = os.path.join(SCRIPT_DIR, "agent-settings.json")
 
     if resume_session_id:
         # Resume a previous session — Claude has full conversation history.
