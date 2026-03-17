@@ -403,8 +403,8 @@ def report_summary(task_sessions, interactive_sessions, multipliers, as_json=Fal
     return None
 
 
-def report_by_task(task_sessions, multipliers, task_filter=None, as_json=False):
-    """Cost breakdown by task."""
+def report_by_task(task_sessions, multipliers, interactive_sessions=None, task_filter=None, as_json=False):
+    """Cost breakdown by task, with interactive sessions section."""
     # Group by task name
     tasks = defaultdict(lambda: {
         "official_cost": 0, "estimated_cost": 0,
@@ -433,6 +433,16 @@ def report_by_task(task_sessions, multipliers, task_filter=None, as_json=False):
         key=lambda x: x[1]["official_cost"] + x[1]["estimated_cost"],
         reverse=True
     )
+
+    # Compute interactive session costs
+    interactive_items = []
+    if interactive_sessions and not task_filter:
+        for s in interactive_sessions:
+            if s.get("assistant_tokens"):
+                est, _ = estimate_cost(s, multipliers)
+                if est > 0:
+                    interactive_items.append((s["display_name"], est))
+        interactive_items.sort(key=lambda x: x[1], reverse=True)
 
     if as_json:
         result = []
@@ -463,7 +473,22 @@ def report_by_task(task_sessions, multipliers, task_filter=None, as_json=False):
         print(f"{name:<40s} {runs:>5d} {off_str:>10s} {est_str:>10s}  ${total:>6.2f}")
 
     print("─" * 77)
-    print(f"{'TOTAL':<40s} {total_runs:>5d}  ${total_official:>6.2f} ~${total_estimated:>6.2f}  ${total_official + total_estimated:>6.2f}")
+    task_total = total_official + total_estimated
+    print(f"{'Task subtotal':<40s} {total_runs:>5d}  ${total_official:>6.2f} ~${total_estimated:>6.2f}  ${task_total:>6.2f}")
+
+    if interactive_items:
+        interactive_total = sum(cost for _, cost in interactive_items)
+        print(f"\n{'Interactive Session':<40s} {'':>5s} {'':>10s} {'Estimated':>10s} {'Total':>10s}")
+        print("─" * 77)
+        for name, cost in interactive_items:
+            print(f"{name:<40s} {'':>5s} {'':>10s} ~${cost:>6.2f}  ${cost:>6.2f}")
+        print("─" * 77)
+        print(f"{'Interactive subtotal':<40s} {len(interactive_items):>5d} {'':>10s} ~${interactive_total:>6.2f}  ${interactive_total:>6.2f}")
+
+        print(f"\n{'═' * 77}")
+        grand_total = task_total + interactive_total
+        print(f"{'GRAND TOTAL':<40s} {'':>5s}  ${total_official:>6.2f} ~${total_estimated + interactive_total:>6.2f}  ${grand_total:>6.2f}")
+
     return None
 
 
@@ -1043,7 +1068,7 @@ def main():
     if args.summary:
         report_summary(task_sessions, interactive_sessions, multipliers)
     if args.by_task:
-        report_by_task(task_sessions, multipliers, task_filter=args.task)
+        report_by_task(task_sessions, multipliers, interactive_sessions=interactive_sessions, task_filter=args.task)
     if args.by_model:
         report_by_model(task_sessions, interactive_sessions, multipliers)
     if args.by_date:
