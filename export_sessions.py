@@ -193,8 +193,7 @@ def main():
                 display_name = custom_title
 
         if not display_name:
-            skipped += 1
-            continue
+            display_name = sid[:12]
 
         # Update display_name in DB if not already set
         if not sess["display_name"] and display_name:
