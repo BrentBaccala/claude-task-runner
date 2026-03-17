@@ -2421,6 +2421,7 @@ def main():
             print("Warning: export_sessions.py exited with errors")
         # Stage and commit
         subprocess.run(["git", "add", "sessions/", "plan-sessions/", "memory/", "tasks.db"], cwd=PROJECT_DIR)
+        subprocess.run(["git", "add", "-u", "sessions/", "plan-sessions/", "memory/"], cwd=PROJECT_DIR)
         result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=PROJECT_DIR)
         if result.returncode != 0:
             subprocess.run(["git", "commit", "-m", "backup: export sessions and update tasks.db"], cwd=PROJECT_DIR)
