@@ -17,6 +17,8 @@ supports iterative debug/fix loops.
 - **Interactive chat** — drop into an interactive session continuing a task's work
 - **Live monitoring** — tail running task output in real-time
 - **Backup** — export sessions and push to a backup remote in one command
+- **Plan mode redirect** — optionally route Claude's plan mode through the task runner
+- **Cost reporting** — track spending by task, session, model, and date
 
 ## Setup
 
@@ -81,6 +83,8 @@ task_runner.py --show my-task -v  # with tool calls
 | `export_sessions.py` | Export session files and memory into the project directory |
 | `init_db.py` | Database schema (creates `tasks.db`) |
 | `agent-settings.json` | PreToolUse hooks passed to agents |
+| `cost_report.py` | Cost analysis by task, session, model, and date |
+| `turn_chart.py` | Visual turn/duration chart for task run history |
 
 ## Task Lifecycle
 
@@ -109,6 +113,14 @@ task_runner.py --show NAME              # Task output (all run headers, last run
 task_runner.py --show NAME -v           # Include tool calls
 task_runner.py --show NAME -vv          # Include tool output
 task_runner.py --show NAME --all        # Full detail for every run
+
+# Cost and analytics
+cost_report.py                         # Summary + cost by task and session
+cost_report.py --by-model              # Cost breakdown by model
+cost_report.py --by-date               # Daily cost breakdown
+cost_report.py --detail                # Per-run detail with token counts
+cost_report.py --task NAME             # Cost for a specific task
+turn_chart.py                          # Visual chart of turns per run
 
 # Running
 task_runner.py --run NAME               # Run a specific task
