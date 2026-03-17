@@ -20,21 +20,33 @@ supports iterative debug/fix loops.
 
 ## Setup
 
-Clone this repo into your project directory:
+**Option A: Scripts and data together** (simplest)
 
 ```bash
-git clone https://github.com/BrentBaccala/claude-task-runner ~/project
-cd ~/project
+git clone https://github.com/BrentBaccala/claude-task-runner ~/myproject
+cd ~/myproject
 ```
 
-Symlink the scripts into your PATH:
+**Option B: Separate script repo and project data** (recommended if you
+want to keep the task runner updatable independently)
 
 ```bash
-ln -s ~/project/task_runner.py ~/.local/bin/task_runner.py
-ln -s ~/project/format_session.py ~/.local/bin/format_session.py
+git clone https://github.com/BrentBaccala/claude-task-runner ~/claude-task-runner
+mkdir ~/myproject && cd ~/myproject
 ```
 
-Then start a Claude Code session and tell it to create tasks:
+Either way, symlink the scripts into your PATH:
+
+```bash
+ln -s ~/claude-task-runner/task_runner.py ~/.local/bin/task_runner.py
+ln -s ~/claude-task-runner/format_session.py ~/.local/bin/format_session.py
+```
+
+All scripts use the current working directory for project data (`tasks.db`,
+`prompts/`, `logs/`), so run them from your project directory.
+
+Then start a Claude Code session in your project directory and tell it to
+create tasks:
 
 > "Create a task to build the project and run the test suite"
 

@@ -5,7 +5,7 @@ import sqlite3
 import json
 import os
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tasks.db')
+DB_PATH = os.path.join(os.getcwd(), 'tasks.db')
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (

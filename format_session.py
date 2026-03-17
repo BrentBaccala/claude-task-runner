@@ -325,7 +325,9 @@ def render_assistant(content_blocks, width, show_thinking=False, show_tools=Fals
 
 
 SESSIONS_DIR = os.path.expanduser("~/.claude/projects/-home-claude")
-TASK_DB = os.path.expanduser("~/project/tasks.db")
+# Look for tasks.db in cwd first, then ~/project as fallback
+_cwd_db = os.path.join(os.getcwd(), "tasks.db")
+TASK_DB = _cwd_db if os.path.exists(_cwd_db) else os.path.expanduser("~/project/tasks.db")
 # Legacy prefix for detecting old task sessions (before DB tracking).
 # New sessions are detected via session_id in the runs table.
 TASK_PROMPT_PREFIX = "You are working on the minimal associated primes computation project."
