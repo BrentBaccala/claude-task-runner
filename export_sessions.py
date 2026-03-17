@@ -193,7 +193,6 @@ def main():
                 display_name = custom_title
 
         if not display_name:
-            print(f"  SKIP {sid[:12]} — no name (use format_session.py --name to set one)")
             skipped += 1
             continue
 
@@ -224,9 +223,13 @@ def main():
                 skipped += 1
                 continue
             else:
-                # Different file — remove stale link
-                if not dry_run:
-                    os.unlink(dest)
+                # Different file with the same name — add session ID suffix
+                base = safe_filename(fname.replace(".jsonl", ""))
+                fname = f"{base}-{sid[:8]}.jsonl"
+                dest = os.path.join(target_dir, fname)
+                if os.path.exists(dest) and os.path.samefile(src, dest):
+                    skipped += 1
+                    continue
 
         action = "WOULD link" if dry_run else "link"
         print(f"  {action} {display_name} -> {os.path.relpath(dest, PROJECT_DIR)}")
