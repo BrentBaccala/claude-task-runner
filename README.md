@@ -42,8 +42,16 @@ ln -s ~/claude-task-runner/task_runner.py ~/.local/bin/task_runner.py
 ln -s ~/claude-task-runner/format_session.py ~/.local/bin/format_session.py
 ```
 
-All scripts use the current working directory for project data (`tasks.db`,
-`prompts/`, `logs/`), so run them from your project directory.
+Scripts find project data (`tasks.db`, `prompts/`, `logs/`) automatically:
+- `TASK_RUNNER_PROJECT` env variable (if set)
+- Current working directory (if it has `tasks.db`)
+- `~/*/tasks.db` (if exactly one match)
+
+For convenience, add to `~/.bashrc`:
+
+```bash
+export TASK_RUNNER_PROJECT=~/myproject
+```
 
 Then start a Claude Code session in your project directory and tell it to
 create tasks:
