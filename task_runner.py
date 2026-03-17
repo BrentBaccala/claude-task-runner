@@ -52,43 +52,24 @@ LOGS_DIR = os.path.join(PROJECT_DIR, 'logs')
 CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
 
 # Map agent types to Claude Code model flags.
-# Opus for tasks requiring complex reasoning (building, coding);
-# Sonnet for tasks that are more straightforward but still need good output;
-# Haiku for fast, cheap exploration tasks.
+# Any type not listed here defaults to "opus".
+# Add new types as needed (e.g., "haiku": "haiku").
 AGENT_MODELS = {
-    "researcher": "opus",
-    "explorer": "opus",
-    "builder": "opus",
-    "tester": "opus",
-    "coder": "opus",
-    "documenter": "opus",
+    "opus": "opus",
     "sonnet": "sonnet",
 }
 
 # Timeout per agent type (seconds). 0 = unlimited.
+# Unlisted types default to 0.
 AGENT_TIMEOUTS = {
-    "builder": 0,
-    "coder": 0,
-    "tester": 0,
-    "researcher": 0,
-    "explorer": 0,
-    "documenter": 0,
-    "sonnet": 0,
 }
 
-# Max turns per agent type.
+# Max turns per agent type. 0 = unlimited.
+# Unlisted types default to 0.
 # IMPORTANT: Claude Code returns exit code 0 even when it hits the max turns
 # limit. We must scan the raw output for "Reached max turns" to detect this
-# (see run_task). The default of 30 is too low for complex coding/build tasks —
-# task 8 (ssi-test-suite) hit 30 turns while still working productively.
+# (see run_task).
 AGENT_MAX_TURNS = {
-    "builder": 0,
-    "coder": 0,
-    "tester": 0,
-    "researcher": 0,
-    "explorer": 0,
-    "documenter": 0,
-    "sonnet": 0,
 }
 
 
@@ -708,10 +689,10 @@ def show_summary(db):
         hours = ms / 3_600_000
         cost = row["total_cost"] or 0
         agent = row["agent_type"]
-        model = AGENT_MODELS.get(agent, "?")
-        timeout_s = AGENT_TIMEOUTS.get(agent, 1800)
-        timeout_str = f"{timeout_s // 60}m"
-        turns = AGENT_MAX_TURNS.get(agent, 30)
+        model = AGENT_MODELS.get(agent, "opus")
+        timeout_s = AGENT_TIMEOUTS.get(agent, 0)
+        timeout_str = "none" if timeout_s == 0 else f"{timeout_s // 60}m"
+        turns = AGENT_MAX_TURNS.get(agent, 0)
         print(f"{agent:<14s} {model:<8s} {timeout_str:>8s} {turns:>6d} {row['runs']:5d} {row['successes']:4d} {hours:7.1f}h ${cost:7.2f}")
 
 
@@ -1741,7 +1722,7 @@ def run_task(db, task):
     resume_session_id = task.get("resume_session_id")
 
     # Build the Claude Code command
-    model = AGENT_MODELS.get(task["agent_type"], "sonnet")
+    model = AGENT_MODELS.get(task["agent_type"], "opus")
     agent_settings = os.path.join(PROJECT_DIR, "agent-settings.json")
 
     if resume_session_id:
@@ -1763,7 +1744,7 @@ def run_task(db, task):
             "--output-format", "stream-json",
             "--settings", agent_settings,
         ]
-        max_turns = task["max_turns"] if task.get("max_turns") is not None else AGENT_MAX_TURNS.get(task["agent_type"], 30)
+        max_turns = task["max_turns"] if task.get("max_turns") is not None else AGENT_MAX_TURNS.get(task["agent_type"], 0)
         if max_turns != 0:
             cmd.extend(["--max-turns", str(max_turns)])
         # Clear the resume_session_id now that we're using it
@@ -1832,7 +1813,7 @@ def run_task(db, task):
             "--model", model,
             "--settings", agent_settings,
         ]
-        max_turns = task["max_turns"] if task.get("max_turns") is not None else AGENT_MAX_TURNS.get(task["agent_type"], 30)
+        max_turns = task["max_turns"] if task.get("max_turns") is not None else AGENT_MAX_TURNS.get(task["agent_type"], 0)
         if max_turns != 0:
             cmd.extend(["--max-turns", str(max_turns)])
 
@@ -1860,7 +1841,7 @@ def run_task(db, task):
     # run synchronously instead of being auto-backgrounded after 2 minutes.
     # This avoids wasteful polling and the orphaned process problems that
     # come with background execution.
-    timeout = task["timeout_seconds"] if task.get("timeout_seconds") is not None else AGENT_TIMEOUTS.get(task["agent_type"], 1800)
+    timeout = task["timeout_seconds"] if task.get("timeout_seconds") is not None else AGENT_TIMEOUTS.get(task["agent_type"], 0)
     if timeout == 0:
         timeout = None  # unlimited
     bash_timeout_ms = str(timeout * 1000) if timeout else str(600000)  # 10min default for bash if unlimited
@@ -2229,7 +2210,7 @@ def main():
     parser.add_argument("--prompt", metavar="TEXT", dest="continue_prompt",
                         help="Custom prompt for --continue (default: 'Continue where you left off.')")
     parser.add_argument("--create", metavar="NAME", nargs="?", const="--help", help="Create a new task")
-    parser.add_argument("--agent", metavar="TYPE", help="Agent type for --create (default: coder)")
+    parser.add_argument("--agent", metavar="TYPE", help="Agent type for --create (default: opus)")
     parser.add_argument("--description", metavar="DESC", dest="task_description", help="Description for --create")
     parser.add_argument("--depends", metavar="DEP", help="Comma-separated dependency task names for --create or --set")
     parser.add_argument("--max-turns", metavar="N", help="Max turns (0 = unlimited, 'default' = reset). For --create or --set")
@@ -2600,7 +2581,7 @@ def main():
             print("The prompt must already exist at: prompts/NAME")
             print()
             print("Options:")
-            print("  --agent TYPE              Agent type (default: coder)")
+            print("  --agent TYPE              Agent type (default: opus)")
             print(f"                            Types: {', '.join(sorted(AGENT_MODELS.keys()))}")
             print("  --description DESC        Task description")
             print("  --depends DEP[,DEP,...]   Comma-separated dependency task names")
@@ -2613,7 +2594,7 @@ def main():
             print("  --iterate-limit N         Max iterations for partial failure chains (default: 5)")
             sys.exit(0)
         name = args.create
-        agent = args.agent or "coder"
+        agent = args.agent or "opus"
         desc = args.task_description or ""
         depends = json.dumps([d.strip() for d in args.depends.split(",") if d.strip()]) if args.depends else "[]"
         max_turns = int(args.max_turns) if args.max_turns and args.max_turns != "default" else None

@@ -18,27 +18,39 @@ supports iterative debug/fix loops.
 - **Live monitoring** — tail running task output in real-time
 - **Backup** — export sessions and push to a backup remote in one command
 
-## Getting Started
+## Setup
 
 Clone this repo into your project directory:
 
 ```bash
-git clone https://github.com/BrentBaccworka/claude-task-runner ~/project
+git clone https://github.com/BrentBaccala/claude-task-runner ~/project
 cd ~/project
 ```
 
-Then ask Claude Code to create and run tasks for you:
+Symlink the scripts into your PATH:
+
+```bash
+ln -s ~/project/task_runner.py ~/.local/bin/task_runner.py
+ln -s ~/project/format_session.py ~/.local/bin/format_session.py
+```
+
+Then start a Claude Code session and tell it to create tasks:
 
 > "Create a task to build the project and run the test suite"
 
 > "Create a task to review the code in src/ for security issues"
 
-> "Show me what task 5 did"
+Claude reads `CLAUDE.md` and knows how to use the task runner — it will
+initialize the database, write prompts, and create tasks. You direct,
+Claude executes.
 
-> "Continue task 12 — try a different approach for the failing test"
+To monitor and view results from the command line:
 
-Claude reads `CLAUDE.md` and knows how to use the task runner. You direct,
-Claude executes. See `CLAUDE.md` for the full reference that Claude uses.
+```bash
+task_runner.py --tail my-task     # live output while running
+task_runner.py --show my-task     # formatted results
+task_runner.py --show my-task -v  # with tool calls
+```
 
 ## Files
 
@@ -106,11 +118,11 @@ Set up automatic test/fix loops:
 
 ```bash
 # Test task: activates fix task on partial failure
-task_runner.py --create my-test --agent tester \
+task_runner.py --create my-test --agent opus \
   --on-partial-failure my-fix --iterate-limit 5
 
 # Fix task: re-runs test after success
-task_runner.py --create my-fix --agent coder \
+task_runner.py --create my-fix --agent opus \
   --rerun-after my-test --hold-on-create
 ```
 
@@ -131,20 +143,24 @@ The task runner parses this to determine success/failure and track progress.
 
 ## Agent Types
 
-| Type | Model | Use For |
-|------|-------|---------|
-| `coder` | opus | Code changes, bug fixes |
-| `builder` | opus | Building from source |
-| `tester` | opus | Running test suites |
-| `researcher` | opus | Analysis, literature search |
-| `explorer` | opus | Codebase exploration |
-| `documenter` | opus | Documentation |
-| `sonnet` | sonnet | Cheaper/faster tasks |
+The default agent types are `opus` and `sonnet`. Any string can be used as
+an agent type — unknown types default to the opus model with no timeout or
+turn limit. To add custom types with different defaults, edit the
+`AGENT_MODELS`, `AGENT_TIMEOUTS`, and `AGENT_MAX_TURNS` dicts near the top
+of `task_runner.py`.
 
-## Optional: Redirect Plan Mode
+## Plan Mode Redirect
 
-If you want Claude's plan mode to create tasks instead of "clear context and
-implement", add a PreToolUse hook to `~/.claude/settings.json`:
+By default, when Claude proposes a plan it enters "plan mode" which clears
+context and implements immediately. You can redirect this to use the task
+runner instead, so plans become tasks that can be reviewed, edited, and run
+on demand.
+
+Ask Claude to set this up:
+
+> "Redirect plan mode to use the task runner instead of clearing context"
+
+Or add the hook manually to `~/.claude/settings.json`:
 
 ```json
 {
@@ -163,9 +179,6 @@ implement", add a PreToolUse hook to `~/.claude/settings.json`:
   }
 }
 ```
-
-This puts plans into the task runner where they can be reviewed, edited, and
-run on demand — rather than immediately clearing context and implementing.
 
 ## Requirements
 

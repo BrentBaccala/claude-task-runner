@@ -9,15 +9,18 @@ debug loops.
 
 ## Startup
 
-On first use, initialize the database:
+On first use, initialize the database and create symlinks:
 
 ```bash
 python3 init_db.py
+ln -s ~/project/task_runner.py ~/.local/bin/task_runner.py
+ln -s ~/project/format_session.py ~/.local/bin/format_session.py
 ```
 
 This creates `tasks.db` with the schema and migrations. The database, prompts,
 logs, and docs directories are project-specific data — they're gitignored in
-this repo and belong in your project.
+this repo and belong in your project. The symlinks make the scripts available
+on the PATH from any directory.
 
 ## Quick Reference
 
@@ -123,15 +126,17 @@ resets the test task to pending. The loop continues as long as N improves.
 
 ## Agent Types
 
-| Type | Model | Timeout | Max Turns | Use For |
-|------|-------|---------|-----------|---------|
-| `coder` | opus | none | none | Code changes, bug fixes, new features |
-| `builder` | opus | none | none | Building from source |
-| `tester` | opus | none | none | Running test suites |
-| `researcher` | opus | none | none | Literature search, analysis |
-| `explorer` | opus | none | none | Quick codebase exploration |
-| `documenter` | opus | none | none | Writing documentation |
-| `sonnet` | sonnet | none | none | Straightforward tasks (cheaper/faster) |
+The default agent types are `opus` and `sonnet`. Any string can be used as
+an agent type — unknown types default to the opus model with no timeout or
+turn limit.
+
+| Type | Model | Use For |
+|------|-------|---------|
+| `opus` | opus | Complex tasks (default) |
+| `sonnet` | sonnet | Straightforward tasks (cheaper/faster) |
+
+To add custom types with different defaults, edit the `AGENT_MODELS`,
+`AGENT_TIMEOUTS`, and `AGENT_MAX_TURNS` dicts near the top of `task_runner.py`.
 
 Override per task with `--max-turns N` or `--timeout SECS` on `--create`.
 Use `0` for unlimited (no max turns limit or no timeout).
@@ -427,8 +432,8 @@ agent to exit.
 
 ## Plan Mode Redirect
 
-To redirect Claude's plan mode to create tasks instead of "clear context
-and implement", add a PreToolUse hook to `~/.claude/settings.json`:
+If the user asks you to redirect plan mode to the task runner, add a
+PreToolUse hook to `~/.claude/settings.json`:
 
 ```json
 {
@@ -447,6 +452,13 @@ and implement", add a PreToolUse hook to `~/.claude/settings.json`:
   }
 }
 ```
+
+When this hook is active, do NOT use `EnterPlanMode`. Instead, when a task
+needs planning:
+
+1. Write the plan to `prompts/NAME` (no extension)
+2. Create the task: `task_runner.py --create NAME --agent TYPE --hold-on-create`
+3. Show the user the plan for review
 
 This puts plans into the task runner where they can be reviewed, edited, and
 run on demand — rather than immediately clearing context and implementing.
