@@ -4,8 +4,12 @@
 import sqlite3
 import json
 import os
+import sys
 
-DB_PATH = os.path.join(os.getcwd(), 'tasks.db')
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+from project_dir import DB_PATH
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (

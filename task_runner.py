@@ -47,10 +47,14 @@ import threading
 from datetime import datetime
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-PROJECT_DIR = os.getcwd()
-DB_PATH = os.path.join(PROJECT_DIR, 'tasks.db')
-LOGS_DIR = os.path.join(PROJECT_DIR, 'logs')
 CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
+
+# Add SCRIPT_DIR to path so we can import project_dir
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+from project_dir import PROJECT_DIR, DB_PATH
+
+LOGS_DIR = os.path.join(PROJECT_DIR, 'logs')
 
 # Map agent types to Claude Code model flags.
 # Any type not listed here defaults to "opus".

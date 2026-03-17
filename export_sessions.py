@@ -19,8 +19,10 @@ import re
 import sqlite3
 import sys
 
-PROJECT_DIR = os.getcwd()
-DB_PATH = os.path.join(PROJECT_DIR, "tasks.db")
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+from project_dir import PROJECT_DIR, DB_PATH
 CLAUDE_DIR = os.path.expanduser("~/.claude")
 SESSIONS_DIR = os.path.join(CLAUDE_DIR, "projects/-home-claude")
 MEMORY_DIR = os.path.join(SESSIONS_DIR, "memory")
