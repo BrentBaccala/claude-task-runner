@@ -945,7 +945,7 @@ def report_validate(task_sessions, as_json=False):
         for v in worst:
             model_short = v["model"].replace("claude-", "")
             print(f"{v['task_name']:<35s} {v['run_id']:>4d} {model_short:<20s} "
-                  f"${v['official']:>8.4f} ${v['calculated']:>8.4f} {v['error_pct']:>+7.2f}%")
+                  f"${v['official']:>9.4f} ${v['calculated']:>9.4f} {v['error_pct']:>+7.2f}%")
 
     # Show multiplier analysis
     print(f"\n── Empirical Multipliers (official_cost / input_cache_cost) ──")
@@ -993,7 +993,7 @@ def report_validate(task_sessions, as_json=False):
     for model, ratios in sorted(model_ratios.items()):
         cv = (statistics.stdev(ratios) / statistics.mean(ratios) * 100) if len(ratios) > 1 else 0
         print(f"{model:<30s} {len(ratios):>6d} {statistics.median(ratios):>7.3f}x "
-              f"{statistics.mean(ratios):>6.3f}x {cv:>5.1f}% {min(ratios):>6.3f}x {max(ratios):>6.3f}x")
+              f"{statistics.mean(ratios):>7.3f}x {cv:>5.1f}% {min(ratios):>7.3f}x {max(ratios):>7.3f}x")
 
     return None
 
