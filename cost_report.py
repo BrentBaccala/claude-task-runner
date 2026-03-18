@@ -988,11 +988,12 @@ def report_validate(task_sessions, as_json=False):
                 )[0]
             model_ratios[primary].append(ratio)
 
-    print(f"{'Model':<30s} {'Count':>6s} {'Median':>8s} {'Mean':>8s} {'Min':>8s} {'Max':>8s}")
-    print("─" * 64)
+    print(f"{'Model':<30s} {'Count':>6s} {'Median':>8s} {'Mean':>8s} {'CV%':>6s} {'Min':>8s} {'Max':>8s}")
+    print("─" * 70)
     for model, ratios in sorted(model_ratios.items()):
+        cv = (statistics.stdev(ratios) / statistics.mean(ratios) * 100) if len(ratios) > 1 else 0
         print(f"{model:<30s} {len(ratios):>6d} {statistics.median(ratios):>7.3f}x "
-              f"{statistics.mean(ratios):>6.3f}x {min(ratios):>6.3f}x {max(ratios):>6.3f}x")
+              f"{statistics.mean(ratios):>6.3f}x {cv:>5.1f}% {min(ratios):>6.3f}x {max(ratios):>6.3f}x")
 
     return None
 
