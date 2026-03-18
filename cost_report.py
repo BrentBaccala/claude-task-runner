@@ -926,7 +926,7 @@ def report_validate(task_sessions, as_json=False):
     print(f"Official = costUSD from result event\n")
 
     print(f"{'Model':<30s} {'Count':>6s} {'Mean Err':>10s} {'Median':>10s} {'Min':>10s} {'Max':>10s}")
-    print("─" * 78)
+    print("─" * 81)
 
     for model, errors in sorted(model_errors.items()):
         mean_err = statistics.mean(errors)
@@ -941,7 +941,7 @@ def report_validate(task_sessions, as_json=False):
     if worst:
         print(f"\nLargest mismatches:")
         print(f"{'Task':<35s} {'Run':>4s} {'Model':<20s} {'Official':>10s} {'Calculated':>10s} {'Error':>8s}")
-        print("─" * 89)
+        print("─" * 92)
         for v in worst:
             model_short = v["model"].replace("claude-", "")
             print(f"{v['task_name']:<35s} {v['run_id']:>4d} {model_short:<20s} "
@@ -989,7 +989,7 @@ def report_validate(task_sessions, as_json=False):
             model_ratios[primary].append(ratio)
 
     print(f"{'Model':<30s} {'Count':>6s} {'Median':>8s} {'Mean':>8s} {'CV%':>6s} {'Min':>8s} {'Max':>8s}")
-    print("─" * 70)
+    print("─" * 80)
     for model, ratios in sorted(model_ratios.items()):
         cv = (statistics.stdev(ratios) / statistics.mean(ratios) * 100) if len(ratios) > 1 else 0
         print(f"{model:<30s} {len(ratios):>6d} {statistics.median(ratios):>7.3f}x "
