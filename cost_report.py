@@ -1011,6 +1011,7 @@ def main():
     parser.add_argument("--all", action="store_true", help="All reports")
     parser.add_argument("--task", type=str, help="Filter to a specific task name")
     parser.add_argument("--since", type=str, help="Filter to sessions since DATE (YYYY-MM-DD)")
+    parser.add_argument("--until", type=str, help="Filter to sessions before DATE (YYYY-MM-DD)")
     parser.add_argument("--json", action="store_true", help="JSON output")
 
     args = parser.parse_args()
@@ -1030,7 +1031,7 @@ def main():
     task_sessions = collect_task_sessions()
     interactive_sessions = collect_interactive_sessions()
 
-    # Apply --since filter
+    # Apply --since/--until filters
     if args.since:
         task_sessions = [
             s for s in task_sessions
@@ -1039,6 +1040,15 @@ def main():
         interactive_sessions = [
             s for s in interactive_sessions
             if (get_date(s.get("first_ts")) or "") >= args.since
+        ]
+    if args.until:
+        task_sessions = [
+            s for s in task_sessions
+            if (get_date(s.get("started_at") or s.get("first_ts")) or "") <= args.until
+        ]
+        interactive_sessions = [
+            s for s in interactive_sessions
+            if (get_date(s.get("first_ts")) or "") <= args.until
         ]
 
     # Compute multipliers from sessions with official costs
