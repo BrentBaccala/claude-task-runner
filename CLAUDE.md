@@ -2,10 +2,30 @@
 
 ## What This Is
 
-The task runner (`task_runner.py`) orchestrates Claude Code agents as subprocesses.
-It manages an SQLite database of tasks, launches agents with specific prompts and
-models, tracks costs and results, auto-commits deliverables, and supports iterative
-debug loops.
+The task runner (`task_runner.py`) manages tasks for Claude Code agents. It
+tracks tasks in a SQLite database with dependencies, iterative chains,
+auto-commit, and result recording. Tasks are executed via the Claude Code
+**Agent tool** from within an interactive session — no `claude --print`
+subprocesses.
+
+## How It Works
+
+The task runner is a management/tracking CLI. Execution happens through the
+Claude Code Agent tool:
+
+```
+1. task_runner.py --prepare NAME     # Mark running, output prompt to stdout
+2. Use the Agent tool with the prompt  # Claude Code spawns a subagent
+3. task_runner.py --complete NAME \   # Record result, handle chains
+     --result-status success \
+     --result-value "184/184" \
+     --output-file /tmp/result.txt
+```
+
+The orchestrating Claude Code session (you, in an interactive chat) handles
+the Agent tool invocation. The task runner handles everything else: prompt
+assembly, run tracking, auto-commit, iterative chains, and dependency
+resolution.
 
 ## Startup
 
@@ -30,28 +50,29 @@ task_runner.py --list                   # All tasks with status and dependencies
 task_runner.py --history                # Tasks sorted by last run time, with total cost
 task_runner.py --summary                # Aggregate stats: runs, time, cost by agent type
 task_runner.py --status                 # Detailed dependency resolution view
-task_runner.py --pending                # Show tasks that would run on --run-ready
+task_runner.py --pending                # Show tasks that would be prepared next
 task_runner.py --show NAME              # Task prompt + run output
 task_runner.py --show NAME --all        # Full detail for every run
 task_runner.py --show NAME -v           # Include tool invocations with timestamps
 task_runner.py --show NAME -vv          # Include tool output
 task_runner.py --show NAME -vvv         # Include file content (Write/Edit bodies)
 
-# Running
-task_runner.py --run NAME               # Run a specific task
-task_runner.py --run-ready              # Run all tasks whose dependencies are met
-task_runner.py --continue NAME          # Continue an interrupted/timed-out/max-turns task
-task_runner.py --continue NAME --prompt "Focus on X"  # Continue with custom prompt
-task_runner.py --chat NAME              # Interactive session continuing a task
-task_runner.py --tail NAME              # Tail live output of a running task
+# Executing (via Agent tool)
+task_runner.py --prepare NAME           # Mark running, output prompt for Agent tool
+task_runner.py --complete NAME \        # Record completion after Agent returns
+  --result-status success \
+  --result-value "N/M" \
+  --output-file /tmp/result.txt
+task_runner.py --continue NAME          # Set up a task for continuation
+task_runner.py --continue NAME --prompt "Focus on X"  # With guidance
 
 # Managing
 task_runner.py --reset NAME             # Reset any non-pending task back to pending
 task_runner.py --resume                 # Reset all interrupted tasks to pending
 task_runner.py --hold NAME              # Pause a pending task
 task_runner.py --unhold NAME            # Resume a held task
-task_runner.py --kill NAME              # Kill a running task's agent process
-task_runner.py --sync NAME              # Update task status from chat continuation
+task_runner.py --kill NAME              # Mark a running task as interrupted
+task_runner.py --sync NAME              # Update task status from session results
 task_runner.py --backup                 # Export sessions, commit, push to backup remote
 
 # Creating (write prompt to prompts/NAME first)
@@ -76,12 +97,12 @@ task_runner.py --commit NAME file1 file2   # Record files as task artifacts
 **Names vs IDs**: Most commands accept either a task name or numeric ID.
 Partial name matches work if unambiguous.
 
-**Important**: Do NOT run tasks (`--run`, `--run-ready`) unless explicitly asked.
+**Important**: Do NOT prepare/execute tasks unless explicitly asked.
 Create the task and write its prompt, then let the user decide when to run it.
 
 When the user says "continue task N" with new information, use
 `--continue NAME --prompt "..."` to queue the continuation prompt. The task
-won't run until the user explicitly runs it — that's the intended workflow.
+won't execute until the user explicitly asks — that's the intended workflow.
 
 ## Creating Tasks
 
@@ -135,11 +156,9 @@ turn limit.
 | `opus` | opus | Complex tasks (default) |
 | `sonnet` | sonnet | Straightforward tasks (cheaper/faster) |
 
-To add custom types with different defaults, edit the `AGENT_MODELS`,
-`AGENT_TIMEOUTS`, and `AGENT_MAX_TURNS` dicts near the top of `task_runner.py`.
-
-Override per task with `--max-turns N` or `--timeout SECS` on `--create`.
-Use `0` for unlimited (no max turns limit or no timeout).
+To add custom types with different model mappings, edit the `AGENT_MODELS`
+dict near the top of `task_runner.py`. The agent type maps to the `model`
+parameter of the Claude Code Agent tool (`opus`, `sonnet`, `haiku`).
 
 ## Task Statuses
 
@@ -187,18 +206,6 @@ detect progress.
 **Important**: The task runner wraps your prompt with standard context including
 the TASK_RESULT instruction. But for clarity, include it in your prompt too.
 
-### Long-Running Commands
-
-For commands that take a while (builds, test suites), pipe output through tee
-so it can be monitored in real-time via `--tail`:
-
-```bash
-make -j4 2>&1 | tee -a $TASK_LIVE_LOG
-./run-tests.sh 2>&1 | tee -a $TASK_LIVE_LOG
-```
-
-Use `-a` (append) so multiple commands don't overwrite each other.
-
 ### Prompt Tips
 
 - Be specific about paths, build directories, and environment setup
@@ -210,22 +217,22 @@ Use `-a` (append) so multiple commands don't overwrite each other.
 ## Continuing Tasks (`--continue`)
 
 When a task hits `failed`, `interrupted`, `timeout`, `max_turns`, `usage_limit`,
-or even `completed`, use `--continue` to resume:
+or even `completed`, use `--continue` to set it up for another run:
 
 ```bash
-task_runner.py --continue my-task    # marks task as pending for resumption
-task_runner.py --continue my-task --prompt "Try a different approach"  # custom prompt
-task_runner.py --run my-task         # or --run-ready to actually run it
+task_runner.py --continue my-task                              # marks pending
+task_runner.py --continue my-task --prompt "Try a different approach"  # with guidance
+task_runner.py --prepare my-task                               # then prepare for Agent tool
 ```
 
-`--continue` extracts the Claude session ID from the last run's log, stores
-it on the task, and sets the task to `pending`. When the task next runs
-(via `--run` or `--run-ready`), it uses `claude --resume SESSION_ID` instead
-of starting a fresh session. This gives the agent its full conversation
-history so it can pick up exactly where it left off.
+`--continue` sets `pending_context` on the task, which gets appended to
+the prompt on the next `--prepare`. Multiple `--continue --prompt` calls
+accumulate guidance. The default continuation message is "Continue where
+you left off."
 
-By default, the resume prompt is "Continue where you left off." Use `--prompt`
-to give the agent specific guidance for the continuation.
+Note: unlike the old `claude --resume` approach, the agent starts a fresh
+session. Include enough context in the prompt for the agent to understand
+what happened previously. Use `--show NAME` to review prior run output.
 
 ## Iterative Task Chains
 
@@ -292,7 +299,7 @@ task_runner.py --create run-tests --agent tester --depends build-it
 ```
 
 - A task won't run until all its dependencies have status `completed`
-- Use `--run-ready` to run all tasks whose dependencies are met
+- Use `--pending` to see which tasks are ready for `--prepare`
 - The `run_on_dep_failure` DB field (set via SQL, not `--create`) allows a
   task to run even if dependencies failed
 
@@ -307,9 +314,9 @@ UPDATE tasks SET resource_group = 'singular-build' WHERE name IN ('build-lset', 
 
 ## Failure Handling
 
-Failed tasks stay in their failed state. Use `--reset` + `--run` to retry
-manually, or `--continue` for tasks that were `failed`, `interrupted`,
-`timeout`, or `max_turns`.
+Failed tasks stay in their failed state. Use `--reset` + `--prepare` to retry,
+or `--continue` for tasks that were `failed`, `interrupted`, `timeout`, or
+`max_turns`.
 
 The one automatic behavior is `on_partial_failure` chains (see Iterative
 Task Chains above): when a task reports `TASK_RESULT: FAILURE` with a
@@ -347,9 +354,6 @@ task_runner.py --show my-task -vv
 
 # See full file content for Write/Edit operations
 task_runner.py --show my-task -vvv
-
-# Monitor a running task in real-time
-task_runner.py --tail my-task
 
 # Aggregate stats
 task_runner.py --summary
@@ -390,9 +394,7 @@ format_session.py --name SESSION_REF "my name"
 The database is `tasks.db` (SQLite). Key tables:
 
 - **tasks**: Task definitions, status, prompts, dependencies, chain config.
-  `resume_session_id` is set by `--continue` for session resumption.
-- **runs**: One row per execution — prompt sent, output, cost, result, log path.
-  `session_id` records the Claude session ID for potential resumption.
+- **runs**: One row per execution — prompt sent, output, result, log path.
 - **deliverables**: Files produced by successful tasks
 - **sessions**: Cache of `~/.claude` session files for `format_session.py`
   (mtime-based, tracks titles, display names, message counts)
@@ -401,34 +403,17 @@ Each run records the exact prompt that was sent (`agent_prompt` column), so you
 can see what every run actually received even if the task's prompt has been
 modified since.
 
-## Hooks (`agent-settings.json`)
+## Architecture Notes
 
-The task runner passes `agent-settings.json` to agents via `--settings`.
-Current hooks:
-
-- **SessionStart**: Exports `TASK_LIVE_LOG`, `BASH_DEFAULT_TIMEOUT_MS`,
-  `BASH_MAX_TIMEOUT_MS` into the agent's environment
-- **PreToolUse (Bash)**: Blocks `run_in_background: true` to prevent orphaned processes
-- **PreToolUse (Agent)**: Reminds model not to write TASK_RESULT before
-  background agents complete
-
-## Infrastructure Details
-
-- **Timestamp injection**: Every stream-json event gets a wall-clock `timestamp`
-  field, enabling precise timing of tool calls in `--show -v` output.
-- **Bash timeout**: `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` are set
-  to match the task timeout, so long commands run synchronously.
-- **PID tracking**: The agent's PID is stored in the `runs` table so `--kill`
-  can find it.
-- **Live logs**: Agents pipe command output through `tee -a $TASK_LIVE_LOG` for
-  real-time monitoring via `--tail`.
-
-## Playwright MCP
-
-If your task uses Playwright browser tools, **always call `browser_close`
-as your very last Playwright action** before finishing. If you don't, the
-Chromium process stays alive and the task runner hangs waiting for the
-agent to exit.
+- **Agent tool execution**: Tasks run as Claude Code Agent tool invocations
+  from within an interactive session. The orchestrating session handles the
+  Agent tool call; the task runner handles everything else.
+- **Auto-commit**: On success, `--complete` commits changes across all git
+  repos under `~/`, excluding infrastructure files and build artifacts.
+- **Backward compatibility**: Old stream-json logs from `claude --print` runs
+  are still viewable with `--show` and `--log`. New runs store plain text.
+- **No subprocesses**: The task runner no longer spawns `claude` processes.
+  There are no PIDs to track, no process trees to kill, no live logs to tail.
 
 ## Plan Mode Redirect
 

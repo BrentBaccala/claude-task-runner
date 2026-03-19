@@ -2,52 +2,45 @@
 # NOTE: The -S flag is required for `env` to split "python3 -u" into two
 # arguments. Without -S, env treats "python3 -u" as a single executable name.
 # The -u flag disables Python's output buffering so log files are written in
-# real-time and --tail shows output immediately instead of after the buffer fills.
+# real-time and log output appears immediately instead of after the buffer fills.
 """
 Task runner for the minimal associated primes project.
 
-Queries the SQLite task database for ready tasks (all dependencies completed),
-launches Claude Code agents as subprocesses via `claude --print`, captures
-output, and records results.
+Manages a SQLite database of tasks with prompts, dependencies, and iterative
+chains. Tasks are executed via the Claude Code Agent tool from within an
+interactive Claude Code session — NOT via `claude --print` subprocesses.
 
-This script is designed to be run from a separate terminal, NOT from inside
-an interactive Claude Code session. Running from within Claude Code causes
-problems: background tasks get killed when the parent session manages
-processes, and the CLAUDECODE environment variable blocks nested sessions.
+Workflow:
+    1. python3 task_runner.py --prepare NAME    # Mark running, output prompt
+    2. Use the Claude Code Agent tool with the prompt
+    3. python3 task_runner.py --complete NAME --result-status success [--result-value "N/M"]
+       (pipe agent output via stdin to record it)
 
-Usage:
-    python3 task_runner.py                  # Run all ready tasks
+Other commands:
     python3 task_runner.py --list           # List all tasks and status
-    python3 task_runner.py --run NAME       # Run a specific task
-    python3 task_runner.py --run-ready      # Run all ready tasks in dependency order
     python3 task_runner.py --status         # Show detailed status
     python3 task_runner.py --reset NAME     # Reset a failed/interrupted task to pending
-    python3 task_runner.py --resume        # Reset all interrupted tasks to pending
-    python3 task_runner.py --hold NAME      # Put a task on hold (skip in --run-ready)
+    python3 task_runner.py --resume         # Reset all interrupted tasks to pending
+    python3 task_runner.py --hold NAME      # Put a task on hold
     python3 task_runner.py --unhold NAME    # Remove hold, return to pending
     python3 task_runner.py --show NAME      # Show agent text only
     python3 task_runner.py --show NAME -v   # Also show tool invocations
     python3 task_runner.py --show NAME -vv  # Also show tool output
-    python3 task_runner.py --tail NAME      # Tail live output of a running task
     python3 task_runner.py --log NAME       # Show formatted log of a task run
-    python3 task_runner.py --kill NAME      # Kill a running task's agent process
-    python3 task_runner.py --continue NAME  # Continue an interrupted/timed-out/max-turns task
+    python3 task_runner.py --kill NAME      # Mark a running task as interrupted
+    python3 task_runner.py --continue NAME  # Set up a task for continuation
 """
 
 import argparse
 import json
 import os
 import re
-import signal
 import sqlite3
 import subprocess
 import sys
-import textwrap
-import threading
 from datetime import datetime
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
 
 # Add SCRIPT_DIR to path so we can import project_dir
 if SCRIPT_DIR not in sys.path:
@@ -64,18 +57,6 @@ AGENT_MODELS = {
     "sonnet": "sonnet",
 }
 
-# Timeout per agent type (seconds). 0 = unlimited.
-# Unlisted types default to 0.
-AGENT_TIMEOUTS = {
-}
-
-# Max turns per agent type. 0 = unlimited.
-# Unlisted types default to 0.
-# IMPORTANT: Claude Code returns exit code 0 even when it hits the max turns
-# limit. We must scan the raw output for "Reached max turns" to detect this
-# (see run_task).
-AGENT_MAX_TURNS = {
-}
 
 
 
@@ -444,50 +425,6 @@ def commit_specific_files(db, run_id, task_name, files):
     print(f"Recorded {len(files)} artifact(s) for task '{task_name}'")
 
 
-def kill_process_tree(pid, sig=signal.SIGTERM):
-    """Kill a process and all its descendants.
-
-    os.killpg() only kills processes in the same process group, but agents
-    spawn nested shells (bash → perl → sh → Singular) that may end up in
-    their own process groups. This walks /proc to find all descendants by
-    parent PID and kills them bottom-up so nothing gets orphaned.
-    """
-    def get_children(parent_pid):
-        children = []
-        try:
-            for entry in os.listdir("/proc"):
-                if not entry.isdigit():
-                    continue
-                try:
-                    with open(f"/proc/{entry}/stat") as f:
-                        stat = f.read()
-                    # /proc/pid/stat format: pid (comm) state ppid ...
-                    # The comm field is in parens and can contain spaces,
-                    # parens, and anything else. Find the LAST ')' to
-                    # reliably split the fields after it.
-                    rest = stat[stat.rfind(')') + 2:]
-                    ppid = int(rest.split()[1])  # state=0, ppid=1
-                    if ppid == parent_pid:
-                        children.append(int(entry))
-                except (FileNotFoundError, ProcessLookupError, PermissionError, IndexError):
-                    continue
-        except FileNotFoundError:
-            pass
-        return children
-
-    def collect_tree(root_pid):
-        """Collect all descendant PIDs depth-first."""
-        pids = []
-        for child in get_children(root_pid):
-            pids.extend(collect_tree(child))
-        pids.append(root_pid)
-        return pids
-
-    for child_pid in collect_tree(pid):
-        try:
-            os.kill(child_pid, sig)
-        except (ProcessLookupError, PermissionError):
-            pass
 
 
 def extract_result_stats(log_path):
@@ -687,18 +624,15 @@ def show_summary(db):
     print(f"Default priority: 10 (higher runs first)")
     print()
 
-    print(f"{'Agent':<14s} {'Model':<8s} {'Timeout':>8s} {'Turns':>6s} {'Runs':>5s} {'OK':>4s} {'Time':>8s} {'Cost':>8s}")
-    print("-" * 67)
+    print(f"{'Agent':<14s} {'Model':<8s} {'Runs':>5s} {'OK':>4s} {'Time':>8s} {'Cost':>8s}")
+    print("-" * 53)
     for row in by_agent:
         ms = row["total_ms"] or 0
         hours = ms / 3_600_000
         cost = row["total_cost"] or 0
         agent = row["agent_type"]
         model = AGENT_MODELS.get(agent, "opus")
-        timeout_s = AGENT_TIMEOUTS.get(agent, 0)
-        timeout_str = "none" if timeout_s == 0 else f"{timeout_s // 60}m"
-        turns = AGENT_MAX_TURNS.get(agent, 0)
-        print(f"{agent:<14s} {model:<8s} {timeout_str:>8s} {turns:>6d} {row['runs']:5d} {row['successes']:4d} {hours:7.1f}h ${cost:7.2f}")
+        print(f"{agent:<14s} {model:<8s} {row['runs']:5d} {row['successes']:4d} {hours:7.1f}h ${cost:7.2f}")
 
 
 def list_tasks(db):
@@ -914,7 +848,12 @@ def resume_interrupted(db):
 
 
 def kill_task(db, name):
-    """Kill a running task's agent process tree and mark as interrupted."""
+    """Mark a running task as interrupted.
+
+    With Agent-tool execution, there is no subprocess to kill — the agent
+    runs inside the Claude Code session. This command just updates the
+    database status so the task can be re-prepared later.
+    """
     task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
     if task is None:
         print(f"Error: task '{name}' not found")
@@ -923,117 +862,29 @@ def kill_task(db, name):
         print(f"Error: task '{name}' is '{task['status']}', not running")
         return False
 
-    # Find the running run with a PID
+    finished_at = datetime.now().isoformat()
+
+    # Update the latest run
     run = db.execute(
-        "SELECT * FROM runs WHERE task_id = ? AND pid IS NOT NULL ORDER BY id DESC LIMIT 1",
+        "SELECT id FROM runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
         (task["id"],),
     ).fetchone()
-
-    if run is None:
-        print(f"Error: no running process found for task '{name}'")
-        print("(The task may have been started before PID tracking was added.)")
-        # Fall back: try to find the process by command line
-        import glob
-        for proc_dir in glob.glob("/proc/[0-9]*"):
-            try:
-                with open(os.path.join(proc_dir, "cmdline"), "rb") as f:
-                    cmdline = f.read().decode("utf-8", errors="replace")
-                if f"Task: {name}" in cmdline:
-                    pid = int(os.path.basename(proc_dir))
-                    print(f"Found agent process by cmdline: PID {pid}")
-                    kill_process_tree(pid, signal.SIGTERM)
-                    print(f"Killed process tree rooted at PID {pid}")
-                    db.execute(
-                        "UPDATE tasks SET status = 'interrupted' WHERE id = ?",
-                        (task["id"],),
-                    )
-                    db.commit()
-                    print(f"Task {name}: KILLED")
-                    return True
-            except (FileNotFoundError, ProcessLookupError, PermissionError):
-                continue
-        print("Could not find the agent process. You may need to kill it manually.")
-        return False
-
-    pid = run["pid"]
-
-    # Check if the process is actually still running
-    try:
-        os.kill(pid, 0)  # Signal 0 = check existence
-    except ProcessLookupError:
-        print(f"PID {pid} is no longer running (stale record)")
-        # Scan the log for a TASK_RESULT marker to determine outcome
-        log_path = run["log_path"]
-        result_status = None
-        result_value = None
-        if log_path and os.path.exists(log_path):
-            with open(log_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if event.get("type") == "assistant":
-                        text = ""
-                        for msg in event.get("message", {}).get("content", []):
-                            if isinstance(msg, dict) and msg.get("type") == "text":
-                                text += msg.get("text", "")
-                        markers = re.findall(r'TASK_RESULT:[ \t]*(SUCCESS|FAILURE)[ \t]*(.*)', text)
-                        if markers:
-                            result_status = markers[-1][0].lower()
-                            result_value = markers[-1][1].strip() or None
-        finished_at = datetime.now().isoformat()
-        if result_status == "success":
-            print(f"Log shows TASK_RESULT: SUCCESS{' ' + result_value if result_value else ''}")
-            db.execute(
-                "UPDATE runs SET finished_at = ?, success = 1, result_status = ?, result_value = ?, pid = NULL WHERE id = ?",
-                (finished_at, result_status, result_value, run["id"]),
-            )
-            db.execute("UPDATE tasks SET status = 'completed', completed_at = ? WHERE id = ?",
-                       (finished_at, task["id"]))
-        elif result_status == "failure":
-            print(f"Log shows TASK_RESULT: FAILURE{' ' + result_value if result_value else ''}")
-            db.execute(
-                "UPDATE runs SET finished_at = ?, success = 0, result_status = ?, result_value = ?, error_message = ?, pid = NULL WHERE id = ?",
-                (finished_at, result_status, result_value, "agent reported task failure (recovered from stale PID)", run["id"]),
-            )
-            db.execute("UPDATE tasks SET status = 'failed' WHERE id = ?", (task["id"],))
-        else:
-            print("No TASK_RESULT found in log — marking as interrupted")
-            db.execute(
-                "UPDATE runs SET finished_at = ?, success = 0, error_message = ?, pid = NULL WHERE id = ?",
-                (finished_at, "process died without result (stale PID)", run["id"]),
-            )
-            db.execute("UPDATE tasks SET status = 'interrupted' WHERE id = ?", (task["id"],))
-        db.commit()
-        return True
-    except PermissionError:
-        pass  # Process exists but we can't signal it (shouldn't happen for our own processes)
-
-    # Kill the entire process tree
-    kill_process_tree(pid, signal.SIGTERM)
-    print(f"Killed process tree rooted at PID {pid}")
-
-    # Update the run and task records
-    finished_at = datetime.now().isoformat()
-    db.execute(
-        "UPDATE runs SET finished_at = ?, success = ?, error_message = ?, pid = NULL WHERE id = ?",
-        (finished_at, False, "killed by user", run["id"]),
-    )
+    if run:
+        db.execute(
+            "UPDATE runs SET finished_at = ?, success = 0, error_message = ? WHERE id = ?",
+            (finished_at, "marked interrupted by user", run["id"]),
+        )
     db.execute(
         "UPDATE tasks SET status = 'interrupted' WHERE id = ?",
         (task["id"],),
     )
     db.commit()
-    print(f"Task {name}: KILLED")
+    print(f"Task {name}: marked as INTERRUPTED")
     return True
 
 
 def hold_task(db, name):
-    """Put a task on hold so it won't be picked up by --run-ready."""
+    """Put a task on hold so it won't be picked up by --prepare."""
     result = db.execute(
         "UPDATE tasks SET status = 'hold' WHERE name = ? AND status = 'pending'",
         (name,),
@@ -1562,74 +1413,6 @@ def format_log(log_path, verbosity=0):
     return "\n".join(lines)
 
 
-def tail_task(db, name, verbosity=0):
-    """Tail the live log of a running task, formatted.
-
-    Watches two files:
-    - The stream-json log for agent text and tool invocations
-    - The live log ($TASK_LIVE_LOG) for real-time command output (e.g., test results)
-
-    During long-running commands, the stream-json log is silent (tool results
-    only appear when the command finishes). The live log fills that gap by
-    showing tee'd output from the actual command as it runs.
-    """
-    import time
-
-    task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
-    if task is None:
-        print(f"Error: task '{name}' not found")
-        return
-    run = db.execute(
-        "SELECT log_path FROM runs WHERE task_id = ? ORDER BY started_at DESC LIMIT 1",
-        (task["id"],),
-    ).fetchone()
-    log_path = run["log_path"] if run else None
-    if not log_path or not os.path.exists(log_path):
-        print(f"No log file for '{name}'")
-        return
-
-    live_log_path = log_path.replace('.log', '-live.log')
-    print(f"Tailing {log_path} (Ctrl+C to stop)\n")
-
-    try:
-        with open(log_path) as main_f:
-            # Print existing main log content
-            for line in main_f:
-                formatted = format_stream_line(line, verbosity=verbosity)
-                if formatted:
-                    print(formatted)
-
-            live_f = None
-            while True:
-                got_output = False
-
-                # Read from main stream-json log
-                line = main_f.readline()
-                if line:
-                    formatted = format_stream_line(line, verbosity=verbosity)
-                    if formatted:
-                        print(formatted)
-                    got_output = True
-
-                # Open live log when it appears
-                if live_f is None and os.path.exists(live_log_path):
-                    live_f = open(live_log_path)
-                    print(f"--- live output ({os.path.basename(live_log_path)}) ---")
-
-                # Read from live log
-                if live_f:
-                    live_line = live_f.readline()
-                    if live_line:
-                        print(live_line, end='')
-                        got_output = True
-
-                if not got_output:
-                    time.sleep(0.3)
-    except KeyboardInterrupt:
-        print("\n(stopped tailing)")
-    finally:
-        if live_f:
-            live_f.close()
 
 
 def log_task(db, name, verbosity=0):
@@ -1653,14 +1436,15 @@ def log_task(db, name, verbosity=0):
 
 
 def continue_task(db, name, prompt=None):
-    """Mark a task for resumption from its last session.
+    """Mark a task for continuation with optional prompt.
 
     Works with failed, interrupted, timed-out, max-turns, or completed tasks.
-    Extracts the session_id from the last run's log and stores it on the task.
-    Sets the task to pending so that --run or --run-ready will resume the
-    Claude session with --resume instead of starting fresh.
+    Sets the task to pending with pending_context that will be appended to
+    the prompt on the next --prepare.
 
-    If prompt is given, it replaces the default "Continue where you left off."
+    If prompt is given, it's added to pending_context. Multiple --continue
+    --prompt calls accumulate guidance. Without a prompt, a default
+    continuation message is set.
     """
     task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
     if task is None:
@@ -1673,154 +1457,88 @@ def continue_task(db, name, prompt=None):
         print(f"Error: task '{name}' has status '{task['status']}', cannot continue")
         return False
 
-    # If already pending with a resume_session_id (previous --continue),
-    # reuse it. Otherwise, look up the session from the last run.
-    session_id = task.get("resume_session_id")
-    if not session_id:
-        last_run = db.execute(
-            "SELECT * FROM runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
-            (task["id"],),
-        ).fetchone()
-        if last_run is None:
-            print(f"Error: no previous run found for task '{name}'")
-            return False
-
-        session_id = last_run["session_id"]
-        if not session_id:
-            session_id = extract_session_id(last_run["log_path"])
-        if not session_id:
-            print(f"Error: could not find session_id for task '{name}'")
-            return False
-
     # Append prompt to pending_context (don't replace) so multiple
     # --continue --prompt calls accumulate guidance
     existing_context = task.get("pending_context") or ""
     if prompt:
         new_context = (existing_context + "\n\n" + prompt).strip() if existing_context else prompt
     else:
-        new_context = existing_context or None
+        new_context = existing_context or "Continue where you left off."
 
     db.execute(
-        "UPDATE tasks SET status = 'pending', resume_session_id = ?, pending_context = ? WHERE id = ?",
-        (session_id, new_context, task["id"]),
+        "UPDATE tasks SET status = 'pending', pending_context = ? WHERE id = ?",
+        (new_context, task["id"]),
     )
     db.commit()
-    print(f"Task '{name}' set to pending with resume session {session_id}")
+    print(f"Task '{name}' set to pending")
     if new_context:
         print(f"Continuation prompt: {new_context}")
     return True
 
 
-def run_task(db, task):
-    """Execute a single task using Claude Code."""
-    name = task["name"]
-    print(f"\n{'='*60}")
-    print(f"Running task: {name}")
-    print(f"Agent type: {task['agent_type']}")
-    print(f"{'='*60}\n")
+def prepare_task(db, name):
+    """Prepare a task for execution via the Claude Code Agent tool.
+
+    Marks the task as running, creates a run record, and outputs the prompt
+    to stdout. The caller (an interactive Claude Code session) should:
+    1. Capture this prompt
+    2. Pass it to the Agent tool
+    3. Call --complete with the result
+
+    Outputs to stdout: the full prompt (for the Agent tool)
+    Outputs to stderr: metadata (run_id, model)
+    """
+    task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
+    if task is None:
+        print(f"Error: task '{name}' not found", file=sys.stderr)
+        return False
+    task = dict(task)
+
+    if task["status"] == "hold":
+        print(f"Error: task '{name}' is on hold. Use --unhold first.", file=sys.stderr)
+        return False
+    if task["status"] == "running":
+        print(f"Error: task '{name}' is already running. Use --kill first.", file=sys.stderr)
+        return False
 
     # Mark as running
     db.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (task["id"],))
     db.commit()
 
-    # Check if this is a resume (set by --continue)
-    resume_session_id = task.get("resume_session_id")
-
-    # Build the Claude Code command
-    model = AGENT_MODELS.get(task["agent_type"], "opus")
-    agent_settings = os.path.join(SCRIPT_DIR, "agent-settings.json")
-
-    if resume_session_id:
-        # Resume a previous session — Claude has full conversation history.
-        # A prompt is required even with --resume; without one, --print exits
-        # immediately with no output.
-        print(f"Resuming session: {resume_session_id}")
-        agent_prompt = task.get("pending_context") or "Continue where you left off."
-        if task.get("pending_context"):
-            db.execute("UPDATE tasks SET pending_context = NULL WHERE id = ?", (task["id"],))
-            db.commit()
-        full_prompt = agent_prompt
-        cmd = [
-            CLAUDE_BIN,
-            "--print",
-            "--resume", resume_session_id,
-            "--dangerously-skip-permissions",
-            "--verbose",
-            "--output-format", "stream-json",
-            "--settings", agent_settings,
-        ]
-        max_turns = task["max_turns"] if task.get("max_turns") is not None else AGENT_MAX_TURNS.get(task["agent_type"], 0)
-        if max_turns != 0:
-            cmd.extend(["--max-turns", str(max_turns)])
-        # Clear the resume_session_id now that we're using it
-        db.execute("UPDATE tasks SET resume_session_id = NULL WHERE id = ?", (task["id"],))
+    # Read prompt from file
+    prompt_path = os.path.join(PROJECT_DIR, "prompts", name)
+    if not os.path.exists(prompt_path):
+        print(f"Error: prompt file not found: {prompt_path}", file=sys.stderr)
+        db.execute("UPDATE tasks SET status = 'failed' WHERE id = ?", (task["id"],))
         db.commit()
-    else:
-        # Read prompt from file
-        prompt_path = os.path.join(PROJECT_DIR, "prompts", name)
-        if not os.path.exists(prompt_path):
-            print(f"Error: prompt file not found: {prompt_path}")
-            db.execute("UPDATE tasks SET status = 'failed' WHERE id = ?", (task["id"],))
-            db.commit()
-            return False
-        with open(prompt_path) as f:
-            prompt = f.read()
+        return False
+    with open(prompt_path) as f:
+        prompt = f.read()
 
-        # Append pending_context if set (injected by on_partial_failure activation)
-        pending_context = task.get("pending_context")
-        if pending_context:
-            prompt = prompt + "\n\n" + ensure_str(pending_context)
-            # Clear pending_context after use
-            db.execute("UPDATE tasks SET pending_context = NULL WHERE id = ?", (task["id"],))
-            db.commit()
+    # Append pending_context if set (injected by on_partial_failure or --continue)
+    pending_context = task.get("pending_context")
+    if pending_context:
+        prompt = prompt + "\n\n" + ensure_str(pending_context)
+        db.execute("UPDATE tasks SET pending_context = NULL WHERE id = ?", (task["id"],))
+        db.commit()
 
-        agent_prompt = prompt
+    agent_prompt = prompt
 
-        # Wrap prompt with standard context for the agent
-        full_prompt = (
-            f"Task: {name}\n"
-            f"Description: {task['description']}\n\n"
-            f"Instructions:\n{prompt}\n\n"
-            f"IMPORTANT: As the very last line of your response, write exactly one of:\n"
-            f"  TASK_RESULT: SUCCESS\n"
-            f"  TASK_RESULT: FAILURE\n"
-            f"When the task has a countable outcome (tests passed, builds completed,\n"
-            f"checks run, etc.), append an N/M value:\n"
-            f"  TASK_RESULT: SUCCESS 184/184\n"
-            f"  TASK_RESULT: FAILURE 10/11\n"
-            f"This signals whether the task's objective was achieved (e.g., tests passed,\n"
-            f"build succeeded), not just whether you completed your analysis.\n"
-            f"If you launched background agents, do NOT write TASK_RESULT until you have\n"
-            f"received task_notification events confirming ALL of them have completed.\n\n"
-            f"For long-running commands (builds, test suites), pipe output through tee\n"
-            f"so it can be monitored in real-time. Use -a (append) so multiple\n"
-            f"commands don't overwrite each other:\n"
-            f"  command 2>&1 | tee -a $TASK_LIVE_LOG"
-        )
-
-        # Claude Code CLI invocation notes:
-        # - --print: non-interactive mode, outputs to stdout and exits
-        # - --dangerously-skip-permissions: no confirmation prompts (safe here
-        #   because agents run in an isolated user directory with git backups)
-        # - --verbose: REQUIRED when using stream-json output format; without it
-        #   Claude errors out: "stream-json requires --verbose"
-        # - --output-format stream-json: produces one JSON event per line, giving
-        #   visibility into tool calls, not just final text output
-        # - The prompt is piped via stdin (not a positional argument) to keep
-        #   it out of /proc/PID/cmdline — agents using pkill -f would otherwise
-        #   match prompt text in the claude process's command line and kill it
-        cmd = [
-            CLAUDE_BIN,
-            "--print",
-            "--dangerously-skip-permissions",
-            "--verbose",
-            "--output-format", "stream-json",
-            "--model", model,
-            "--settings", agent_settings,
-        ]
-        max_turns = task["max_turns"] if task.get("max_turns") is not None else AGENT_MAX_TURNS.get(task["agent_type"], 0)
-        if max_turns != 0:
-            cmd.extend(["--max-turns", str(max_turns)])
+    # Wrap prompt with standard context for the agent
+    full_prompt = (
+        f"Task: {name}\n"
+        f"Description: {task['description']}\n\n"
+        f"Instructions:\n{prompt}\n\n"
+        f"IMPORTANT: As the very last line of your response, write exactly one of:\n"
+        f"  TASK_RESULT: SUCCESS\n"
+        f"  TASK_RESULT: FAILURE\n"
+        f"When the task has a countable outcome (tests passed, builds completed,\n"
+        f"checks run, etc.), append an N/M value:\n"
+        f"  TASK_RESULT: SUCCESS 184/184\n"
+        f"  TASK_RESULT: FAILURE 10/11\n"
+        f"This signals whether the task's objective was achieved (e.g., tests passed,\n"
+        f"build succeeded), not just whether you completed your analysis.\n"
+    )
 
     # Record run start with the prompt that will be sent
     started_at = datetime.now().isoformat()
@@ -1831,256 +1549,69 @@ def run_task(db, task):
     run_id = cursor.lastrowid
     db.commit()
 
-    # Claude Code sets CLAUDECODE in the environment to detect (and block)
-    # nested sessions. When this script is launched from inside Claude Code,
-    # we must remove this variable so the subprocess agents can start.
-    env = os.environ.copy()
-    env.pop("CLAUDECODE", None)
+    # Output metadata to stderr, prompt to stdout
+    model = AGENT_MODELS.get(task["agent_type"], "opus")
+    print(f"run_id={run_id} model={model}", file=sys.stderr)
 
-    # Stream output to a per-run log file so each run is preserved
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    log_path = os.path.join(LOGS_DIR, f"{name}-{run_id}.log")
-    live_log_path = os.path.join(LOGS_DIR, f"{name}-{run_id}-live.log")
-    env["TASK_LIVE_LOG"] = live_log_path
-    # Increase Bash tool timeout so long-running commands (test suites, builds)
-    # run synchronously instead of being auto-backgrounded after 2 minutes.
-    # This avoids wasteful polling and the orphaned process problems that
-    # come with background execution.
-    timeout = task["timeout_seconds"] if task.get("timeout_seconds") is not None else AGENT_TIMEOUTS.get(task["agent_type"], 0)
-    if timeout == 0:
-        timeout = None  # unlimited
-    bash_timeout_ms = str(timeout * 1000) if timeout else str(600000)  # 10min default for bash if unlimited
-    env["BASH_DEFAULT_TIMEOUT_MS"] = bash_timeout_ms
-    env["BASH_MAX_TIMEOUT_MS"] = bash_timeout_ms
-    db.execute("UPDATE runs SET log_path = ? WHERE id = ?", (log_path, run_id))
-    db.commit()
-    print(f"Log: {log_path}")
+    # Output the prompt for the Agent tool
+    print(full_prompt)
+    return True
 
-    continuable_reason = None  # set to "timeout" or "max_turns" for --continue
 
-    try:
-        # start_new_session=True creates a new session so Ctrl+C in the
-        # terminal only hits the task_runner, not the claude subprocess.
-        # On timeout or interrupt, we use kill_process_tree() to walk /proc
-        # and kill all descendants — os.killpg() is insufficient because
-        # nested shells (bash → perl → sh → Singular) create new process
-        # groups that os.killpg() can't reach.
-        log_file = open(log_path, "w")
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=os.path.expanduser("~"),
-            env=env,
-            start_new_session=True,
-        )
-        # Pipe the prompt via stdin to keep it out of /proc/PID/cmdline.
-        # Close stdin immediately after writing so claude knows input is done.
-        proc.stdin.write(full_prompt)
-        proc.stdin.close()
+def complete_task(db, name, result_status, result_value=None, agent_output=None):
+    """Record the completion of a task executed via the Agent tool.
 
-        # Timestamp injection thread: reads stream-json lines from stdout,
-        # adds a wall-clock timestamp to each JSON event, and writes to the
-        # log file.  This gives us precise timing on every tool call, result,
-        # and session event — critical for measuring test durations.
-        def timestamp_writer():
-            try:
-                for line in proc.stdout:
-                    line = line.rstrip("\n")
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                        event["timestamp"] = datetime.now().isoformat()
-                        log_file.write(json.dumps(event) + "\n")
-                    except (json.JSONDecodeError, TypeError):
-                        # Not valid JSON — write as-is with a timestamp comment
-                        log_file.write(line + "\n")
-                    log_file.flush()
-            except ValueError:
-                pass  # log_file closed during shutdown
+    Called after the Agent tool returns. Updates the run record, handles
+    iterative chains, auto-commits on success, and records deliverables.
 
-        writer_thread = threading.Thread(target=timestamp_writer, daemon=True)
-        writer_thread.start()
+    Args:
+        name: Task name
+        result_status: "success" or "failure"
+        result_value: Optional N/M value (e.g., "184/184")
+        agent_output: The agent's text output (for logging/review)
+    """
+    task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
+    if task is None:
+        print(f"Error: task '{name}' not found")
+        return False
+    task = dict(task)
 
-        # Record the agent PID so --kill can find it
-        db.execute("UPDATE runs SET pid = ? WHERE id = ?", (proc.pid, run_id))
-        db.commit()
+    # Find the most recent run (created by --prepare)
+    run = db.execute(
+        "SELECT * FROM runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+        (task["id"],),
+    ).fetchone()
+    if run is None:
+        print(f"Error: no run found for task '{name}'")
+        return False
+    run_id = run["id"]
 
-        # Collect stderr in a thread to avoid pipe buffer deadlock
-        stderr_chunks = []
-        def stderr_reader():
-            try:
-                stderr_chunks.append(proc.stderr.read())
-            except ValueError:
-                pass
-        stderr_thread = threading.Thread(target=stderr_reader, daemon=True)
-        stderr_thread.start()
+    success = result_status == "success"
+    error_reason = None if success else "agent reported task failure"
 
-        try:
-            try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                kill_process_tree(proc.pid, signal.SIGTERM)
-                proc.wait(timeout=10)
-                raise
-            writer_thread.join(timeout=5)
-            stderr_thread.join(timeout=5)
-            stderr = "".join(stderr_chunks)
-        except subprocess.TimeoutExpired:
-            writer_thread.join(timeout=5)
-            stderr_thread.join(timeout=5)
-            stderr = "".join(stderr_chunks)
-            raise
-        finally:
-            log_file.close()
-
-        output = format_log(log_path)
-        success = proc.returncode == 0
-        error_reason = None
-
-        # Claude Code returns exit code 0 even when it hits the max turns
-        # limit and stops mid-task. We check the LAST result event's subtype
-        # — not the first, because a single invocation can have multiple
-        # sessions (e.g., max_turns hit, then subagent notifications restart
-        # the session and it finishes successfully).
-        last_result_subtype = ""
-        last_result_is_error = False
-        last_result_text = ""
-        with open(log_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if event.get("type") == "result":
-                    last_result_subtype = event.get("subtype", "")
-                    last_result_is_error = event.get("is_error", False)
-                    last_result_text = event.get("result", "")
-        if success and "max_turns" in last_result_subtype:
-            success = False
-            error_reason = "agent hit max turns limit"
-            continuable_reason = "max_turns"
-            stderr = (stderr or "") + f"\nDetected: {error_reason}"
-
-        # Detect when the agent hits its usage/rate limit
-        if last_result_is_error and "hit your limit" in last_result_text:
-            success = False
-            error_reason = "agent hit usage limit"
-            continuable_reason = "usage_limit"
-            stderr = (stderr or "") + f"\nDetected: {error_reason}"
-
-        # Check for agent result marker in output.
-        # Agents should write TASK_RESULT: SUCCESS or TASK_RESULT: FAILURE
-        # to explicitly signal task outcome. This overrides exit code.
-        # Extended format: TASK_RESULT: SUCCESS 11/11  or  TASK_RESULT: FAILURE 10/11
-        result_status = None
-        result_value = None
-        if success:
-            # Find the LAST marker in the output (agent may discuss results before concluding)
-            markers = re.findall(r'TASK_RESULT:[ \t]*(SUCCESS|FAILURE)[ \t]*(.*)', output)
-            if not markers:
-                success = False
-                error_reason = "no TASK_RESULT marker in output"
-            else:
-                result_status = markers[-1][0].lower()
-                result_value = markers[-1][1].strip() or None
-                if markers[-1][0] == "FAILURE":
-                    success = False
-                    error_reason = "agent reported task failure"
-
-        if not success and not error_reason:
-            if stderr:
-                error_reason = stderr.strip()[:500]
-            else:
-                error_reason = f"exit code {proc.returncode}"
-        if success:
-            error_reason = None
-
-        if not success and stderr:
-            output += f"\n\nSTDERR:\n{stderr}"
-
-    except subprocess.TimeoutExpired:
-        output = f"Task timed out after {timeout} seconds"
-        error_reason = f"timed out after {timeout} seconds"
-        continuable_reason = "timeout"
-        success = False
-        result_status = None
-        result_value = None
-    except KeyboardInterrupt:
-        # Kill the entire process tree and mark as interrupted
-        try:
-            kill_process_tree(proc.pid, signal.SIGTERM)
-            proc.wait(timeout=10)
-        except Exception:
-            pass
-        finally:
-            log_file.close()
-        output = "Task interrupted by user"
-        finished_at = datetime.now().isoformat()
-        db.execute(
-            "UPDATE runs SET finished_at = ?, agent_output = ?, success = ?, error_message = ?, pid = NULL WHERE id = ?",
-            (finished_at, output, False, "interrupted by user", run_id),
-        )
-        db.execute(
-            "UPDATE tasks SET status = 'interrupted' WHERE id = ?", (task["id"],)
-        )
-        db.commit()
-        print(f"\nTask {name}: INTERRUPTED")
-        raise
-    except Exception as e:
-        output = f"Error launching agent: {e}"
-        error_reason = str(e)
-        success = False
-        result_status = None
-        result_value = None
+    # Write agent output to a log file
+    log_path = None
+    if agent_output:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        log_path = os.path.join(LOGS_DIR, f"{name}-{run_id}.txt")
+        with open(log_path, "w") as f:
+            f.write(agent_output)
 
     # Auto-commit changes across all repos on success
     if success:
         post_task_commit(db, run_id, name)
 
-    # Extract cost/turns/duration/tokens and session_id from the log
-    cost_usd, num_turns, duration_ms, tokens = extract_result_stats(log_path)
-    session_id = extract_session_id(log_path)
-
-    # Record results (clear pid since process is done)
+    # Record results
     finished_at = datetime.now().isoformat()
     db.execute(
         "UPDATE runs SET finished_at = ?, agent_output = ?, success = ?, error_message = ?, "
-        "cost_usd = ?, num_turns = ?, duration_ms = ?, pid = NULL, "
-        "result_status = ?, result_value = ?, session_id = ?, "
-        "input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_write_tokens = ? "
+        "log_path = ?, result_status = ?, result_value = ? "
         "WHERE id = ?",
-        (
-            finished_at,
-            output,
-            success,
-            error_reason,
-            cost_usd,
-            num_turns,
-            duration_ms,
-            result_status,
-            result_value,
-            session_id,
-            tokens["input"] if tokens else None,
-            tokens["output"] if tokens else None,
-            tokens["cache_read"] if tokens else None,
-            tokens["cache_write"] if tokens else None,
-            run_id,
-        ),
+        (finished_at, agent_output, success, error_reason, log_path,
+         result_status, result_value, run_id),
     )
 
-    if success:
-        new_status = "completed"
-    elif continuable_reason:
-        new_status = continuable_reason  # "timeout" or "max_turns"
-    else:
-        new_status = "failed"
+    new_status = "completed" if success else "failed"
     db.execute(
         "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
         (new_status, finished_at if success else None, task["id"]),
@@ -2088,106 +1619,42 @@ def run_task(db, task):
     db.commit()
 
     # Handle rerun_after: when this task succeeds, reset the named test task
-    # so it re-runs with the fix applied
     if success and task.get("rerun_after"):
         rerun_name = task["rerun_after"]
         rerun_task = db.execute("SELECT * FROM tasks WHERE name = ?", (rerun_name,)).fetchone()
         if rerun_task:
-            # Reset the test task to pending
             db.execute(
                 "UPDATE tasks SET status = 'pending', completed_at = NULL WHERE name = ?",
                 (rerun_name,),
             )
-            # Re-hold fix tasks in the chain
             reset_chain(db, dict(rerun_task))
             db.commit()
-            print(f"\n  → Rerun triggered: {rerun_name} reset to pending")
+            print(f"  → Rerun triggered: {rerun_name} reset to pending")
         else:
-            print(f"\n  → rerun_after target '{rerun_name}' not found")
+            print(f"  → rerun_after target '{rerun_name}' not found")
 
     # Record deliverable if successful
     if success and task.get("deliverable_path"):
         db.execute(
             "INSERT INTO deliverables (task_id, run_id, type, path, description) VALUES (?, ?, ?, ?, ?)",
-            (
-                task["id"],
-                run_id,
-                task.get("deliverable_type", "document"),
-                task["deliverable_path"],
-                f"Output from task {name}",
-            ),
+            (task["id"], run_id, task.get("deliverable_type", "document"),
+             task["deliverable_path"], f"Output from task {name}"),
         )
         db.commit()
 
     status_str = "COMPLETED" if success else "FAILED"
-    print(f"\n{'='*60}")
     print(f"Task {name}: {status_str}")
+    if result_value:
+        print(f"  Result: {result_value}")
     if error_reason:
         print(f"  Reason: {error_reason}")
-    print(f"{'='*60}\n")
 
-    # Print truncated output
-    if output:
-        lines = output.split("\n")
-        if len(lines) > 50:
-            print("\n".join(lines[:25]))
-            print(f"\n... ({len(lines) - 50} lines omitted) ...\n")
-            print("\n".join(lines[-25:]))
-        else:
-            print(output)
-
-    # Handle failure: auto-retry or create repair task
-    # Skip for continuable statuses (timeout/max_turns) — use --continue instead
-    if not success and not continuable_reason:
-        # Re-read task from DB (status was just updated)
+    # Handle failure chains (on_partial_failure)
+    if not success:
         task = dict(db.execute("SELECT * FROM tasks WHERE id = ?", (task["id"],)).fetchone())
         handle_failure(db, task, error_reason, run_id)
 
     return success
-
-
-def run_ready(db):
-    """Run all ready tasks, looping until no more become ready."""
-
-    # DON'T install a custom SIGINT handler here. The default Python behavior
-    # raises KeyboardInterrupt, which is caught by run_task()'s try/except
-    # block during proc.communicate(). A custom signal handler that calls
-    # sys.exit() fights with communicate()'s blocking I/O — the exit runs
-    # inside the signal handler context while communicate() is blocked on
-    # the subprocess pipe, causing Ctrl+C to appear to do nothing.
-    #
-    # The subprocess uses start_new_session=True (its own process group),
-    # so Ctrl+C from the terminal only hits the task_runner, not the claude
-    # process directly. The KeyboardInterrupt path in run_task() then calls
-    # kill_process_tree() to kill all descendants and marks the task interrupted.
-
-    while True:
-        ready = get_ready_tasks(db)
-        if not ready:
-            print("\nNo more ready tasks.")
-            break
-
-        print(f"\n{len(ready)} task(s) ready: {', '.join(t['name'] for t in ready)}")
-
-        interrupted = False
-        for task in ready:
-            try:
-                success = run_task(db, task)
-                if not success:
-                    print(f"\nTask {task['name']} failed. Continuing with other tasks...")
-            except KeyboardInterrupt:
-                interrupted = True
-                break
-        if interrupted:
-            break
-
-        # Re-check for newly unblocked tasks
-        db = get_db()  # Refresh connection
-
-    # Final status
-    print("\n" + "=" * 60)
-    print("Final Status:")
-    list_tasks(db)
 
 
 def main():
@@ -2196,18 +1663,20 @@ def main():
     parser.add_argument("--summary", action="store_true", help="Show aggregate run statistics")
     parser.add_argument("--history", action="store_true", help="List tasks sorted by last run time")
     parser.add_argument("--status", action="store_true", help="Show detailed status")
-    parser.add_argument("--run", metavar="NAME", help="Run a specific task")
-    parser.add_argument("--run-ready", action="store_true", help="Run all ready tasks")
-    parser.add_argument("--pending", action="store_true", help="Show tasks that would run on --run-ready")
+    parser.add_argument("--prepare", metavar="NAME", help="Prepare a task: mark running, output prompt for Agent tool")
+    parser.add_argument("--complete", metavar="NAME", help="Record completion of a task run via Agent tool")
+    parser.add_argument("--result-status", metavar="STATUS", choices=["success", "failure"],
+                        help="Result status for --complete (success or failure)")
+    parser.add_argument("--result-value", metavar="VALUE", help="Result value for --complete (e.g., '184/184')")
+    parser.add_argument("--output-file", metavar="PATH", help="File containing agent output for --complete")
+    parser.add_argument("--pending", action="store_true", help="Show tasks that would run next")
     parser.add_argument("--reset", metavar="NAME", help="Reset a failed/interrupted task")
     parser.add_argument("--resume", action="store_true", help="Reset all interrupted tasks to pending")
     parser.add_argument("--hold", metavar="NAME", help="Put a task on hold")
     parser.add_argument("--unhold", metavar="NAME", help="Remove hold from a task")
     parser.add_argument("--show", metavar="NAME", help="Show task prompt and run output")
-    parser.add_argument("--tail", metavar="NAME", help="Tail live output of a running task")
     parser.add_argument("--log", metavar="NAME", help="Show formatted log of a task run")
-    parser.add_argument("--kill", metavar="NAME", help="Kill a running task's agent process")
-    parser.add_argument("--chat", metavar="NAME", help="Open interactive claude session resuming a task's last run")
+    parser.add_argument("--kill", metavar="NAME", help="Mark a running task as interrupted")
     parser.add_argument("--sync", metavar="NAME", help="Update task status from chat continuation results")
     parser.add_argument("--backup", action="store_true", help="Export sessions, commit changes, and push to backup remote")
     parser.add_argument("--continue", metavar="NAME", dest="continue_task",
@@ -2242,20 +1711,33 @@ def main():
         list_history(db)
     elif args.status:
         show_status(db)
-    elif args.run:
-        name = resolve_task_name(db, args.run)
+    elif args.prepare:
+        name = resolve_task_name(db, args.prepare)
         if name is None:
             sys.exit(1)
-        task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
-        if task is None:
-            print(f"Error: task '{name}' not found")
+        if not prepare_task(db, name):
             sys.exit(1)
-        if task["status"] == "hold":
-            print(f"Error: task '{name}' is on hold. Use --unhold first.")
+    elif args.complete:
+        name = resolve_task_name(db, args.complete)
+        if name is None:
             sys.exit(1)
-        run_task(db, dict(task))
-    elif args.run_ready:
-        run_ready(db)
+        if not args.result_status:
+            print("Error: --complete requires --result-status (success or failure)")
+            sys.exit(1)
+        # Read agent output from --output-file, stdin, or nothing
+        agent_output = None
+        if args.output_file:
+            if os.path.exists(args.output_file):
+                with open(args.output_file) as f:
+                    agent_output = f.read()
+            else:
+                print(f"Warning: output file not found: {args.output_file}", file=sys.stderr)
+        elif not sys.stdin.isatty():
+            agent_output = sys.stdin.read()
+        if not complete_task(db, name, args.result_status,
+                            result_value=args.result_value,
+                            agent_output=agent_output):
+            sys.exit(1)
     elif args.pending:
         running = db.execute(
             "SELECT t.*, r.pid FROM tasks t LEFT JOIN runs r ON t.id = r.task_id AND r.finished_at IS NULL "
@@ -2401,10 +1883,6 @@ def main():
         name = resolve_task_name(db, args.show)
         if name:
             show_task(db, name, verbosity=args.verbose, all_runs=args.all)
-    elif args.tail:
-        name = resolve_task_name(db, args.tail)
-        if name:
-            tail_task(db, name, verbosity=args.verbose)
     elif args.log:
         name = resolve_task_name(db, args.log)
         if name:
@@ -2495,25 +1973,6 @@ def main():
             print(f"Task '{name}': {old_status} → {new_task_status} (TASK_RESULT: {result_status.upper()}{val_str})")
             if old_result and old_result != result_status:
                 print(f"  (run result changed from {old_result} to {result_status})")
-    elif args.chat:
-        name = resolve_task_name(db, args.chat)
-        if name:
-            row = db.execute(
-                "SELECT session_id, log_path FROM runs WHERE task_id = "
-                "(SELECT id FROM tasks WHERE name = ?) ORDER BY id DESC LIMIT 1",
-                (name,),
-            ).fetchone()
-            if not row:
-                print(f"Error: task '{name}' has no runs yet")
-                sys.exit(1)
-            session_id = row["session_id"]
-            if not session_id:
-                session_id = extract_session_id(row["log_path"])
-            if not session_id:
-                print(f"Error: could not find session ID for task '{name}'")
-                sys.exit(1)
-            os.chdir(os.path.expanduser("~"))
-            os.execvp(CLAUDE_BIN, [CLAUDE_BIN, "--resume", session_id, "--dangerously-skip-permissions"])
     elif args.continue_task:
         name = resolve_task_name(db, args.continue_task)
         if name:
@@ -2669,7 +2128,7 @@ def main():
         ready = get_ready_tasks(db)
         if ready:
             print(f"Ready to run: {', '.join(t['name'] for t in ready)}")
-            print("Use --run-ready to execute, or --run NAME for a specific task")
+            print("Use --prepare NAME to get the prompt for the Agent tool")
         else:
             print("No tasks ready. Check --status for blocking dependencies.")
 
@@ -2680,9 +2139,8 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        # Safety net: if KeyboardInterrupt escapes run_task() (e.g., raised
-        # during log reading or DB update after communicate() returns), make
-        # sure any tasks left in 'running' state get marked 'interrupted'.
+        # Safety net: make sure any tasks left in 'running' state get
+        # marked 'interrupted' on unexpected exit.
         print("\n\nInterrupted! Cleaning up...")
         try:
             db = get_db()
