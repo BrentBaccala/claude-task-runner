@@ -206,6 +206,18 @@ detect progress.
 **Important**: The task runner wraps your prompt with standard context including
 the TASK_RESULT instruction. But for clarity, include it in your prompt too.
 
+### Long-Running Commands
+
+For commands that take a while (builds, test suites), pipe output through tee
+so it can be monitored in real-time via `--tail`:
+
+```bash
+make -j4 2>&1 | tee -a $TASK_LIVE_LOG
+./run-tests.sh 2>&1 | tee -a $TASK_LIVE_LOG
+```
+
+Use `-a` (append) so multiple commands don't overwrite each other.
+
 ### Prompt Tips
 
 - Be specific about paths, build directories, and environment setup
@@ -414,6 +426,13 @@ modified since.
   are still viewable with `--show` and `--log`. New runs store plain text.
 - **No subprocesses**: The task runner no longer spawns `claude` processes.
   There are no PIDs to track, no process trees to kill, no live logs to tail.
+
+## Playwright MCP
+
+If your task uses Playwright browser tools, **always call `browser_close`
+as your very last Playwright action** before finishing. If you don't, the
+Chromium process stays alive and the task runner hangs waiting for the
+agent to exit.
 
 ## Plan Mode Redirect
 
