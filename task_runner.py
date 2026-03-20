@@ -1933,6 +1933,10 @@ def main():
             sys.exit(1)
         if not complete_task(db, name, agent_output, agent_id=args.agent_id):
             sys.exit(1)
+        if not args.agent_id:
+            print(f"\nWarning: no --agent-id provided. Output was recorded but --chat won't work.")
+            print(f"Fix with: task_runner.py --set-agent-id {name} AGENT_ID")
+            sys.exit(1)
     elif args.pending:
         running = db.execute(
             "SELECT t.*, r.pid FROM tasks t LEFT JOIN runs r ON t.id = r.task_id AND r.finished_at IS NULL "
