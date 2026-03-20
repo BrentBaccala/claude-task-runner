@@ -1735,7 +1735,7 @@ def prepare_task(db, name):
     return True
 
 
-def complete_task(db, name, agent_output):
+def complete_task(db, name, agent_output, agent_id=None):
     """Record the completion of a task executed via the Agent tool.
 
     Called after the Agent tool returns. Parses agent_output for the
@@ -1746,6 +1746,7 @@ def complete_task(db, name, agent_output):
     Args:
         name: Task name
         agent_output: The agent's text output (required)
+        agent_id: Optional agent ID (for --chat support)
     """
     task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
     if task is None:
@@ -1762,6 +1763,11 @@ def complete_task(db, name, agent_output):
         print(f"Error: no run found for task '{name}'")
         return False
     run_id = run["id"]
+
+    # Record agent_id if provided (enables --chat)
+    if agent_id and not run["agent_id"]:
+        db.execute("UPDATE runs SET agent_id = ? WHERE id = ?", (agent_id, run_id))
+        db.commit()
 
     # Parse TASK_RESULT marker from output
     result_status = None
@@ -1854,6 +1860,7 @@ def main():
     parser.add_argument("--prepare", metavar="NAME", help="Prepare a task: mark running, output prompt for Agent tool")
     parser.add_argument("--complete", metavar="NAME", help="Record completion of a task run via Agent tool")
     parser.add_argument("--output-file", metavar="PATH", help="File containing agent output for --complete")
+    parser.add_argument("--agent-id", metavar="ID", help="Agent ID for --complete (enables --chat)")
     parser.add_argument("--pending", action="store_true", help="Show tasks that would run next")
     parser.add_argument("--reset", metavar="NAME", help="Reset a failed/interrupted task")
     parser.add_argument("--resume", action="store_true", help="Reset all interrupted tasks to pending")
@@ -1924,7 +1931,7 @@ def main():
         if not agent_output:
             print("Error: --complete requires agent output (pipe via stdin or use --output-file)")
             sys.exit(1)
-        if not complete_task(db, name, agent_output):
+        if not complete_task(db, name, agent_output, agent_id=args.agent_id):
             sys.exit(1)
     elif args.pending:
         running = db.execute(
