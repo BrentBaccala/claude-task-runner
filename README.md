@@ -74,6 +74,16 @@ task_runner.py --show my-task     # formatted results
 task_runner.py --show my-task -v  # with tool calls
 ```
 
+`--show` verbosity levels:
+
+| Flag | Shows |
+|------|-------|
+| (default) | Agent's final result text |
+| `-v` | Full agent text from subagent log |
+| `-vv` | + tool invocations (which tools were called) |
+| `-vvv` | + tool output (results from each tool) |
+| `-vvvv` | + full tool input content (Write bodies, Edit strings) |
+
 ## Files
 
 | File | Purpose |
