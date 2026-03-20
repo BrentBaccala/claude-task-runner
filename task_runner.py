@@ -1641,7 +1641,7 @@ def chat_task(db, name):
     print(f"Launching claude --resume ...")
 
     os.chdir(os.path.expanduser("~"))
-    os.execvp(CLAUDE_BIN, [CLAUDE_BIN, "--resume", new_session_id])
+    os.execvp(CLAUDE_BIN, [CLAUDE_BIN, "--resume", new_session_id, "--dangerously-skip-permissions"])
 
 
 def continue_task(db, name, prompt=None):
