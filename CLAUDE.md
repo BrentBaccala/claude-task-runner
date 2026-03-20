@@ -111,6 +111,59 @@ When the user says "continue task N" with new information, use
 `--continue NAME --prompt "..."` to queue the continuation prompt. The task
 won't execute until the user explicitly asks — that's the intended workflow.
 
+## Executing a Task (Step-by-Step)
+
+When the user asks you to run a task, follow these steps exactly:
+
+### Step 1: Prepare
+```bash
+python3 ~/claude-task-runner/task_runner.py --prepare NAME
+```
+This marks the task as running, creates a run record, and outputs the
+prompt to stdout. Capture the prompt text. Note the `model=` on stderr.
+
+### Step 2: Launch the Agent
+Use the Agent tool with:
+- `prompt`: the full text output from --prepare
+- `model`: the model from stderr (opus, sonnet, or haiku)
+- `run_in_background`: true if you want to tail it or do other work
+- `description`: a short summary of the task
+
+### Step 3: Record the Agent ID
+Immediately after the Agent tool returns (or launches in background),
+extract the `agentId:` from the result and record it:
+```bash
+python3 ~/claude-task-runner/task_runner.py --set-agent-id NAME AGENT_ID
+```
+This is **required** — it enables both `--tail` and `--chat`.
+
+For background agents, do this immediately after launch (before the
+agent finishes) so `--tail` works while it's running.
+
+### Step 4: Complete
+After the agent finishes, pipe its full output to `--complete`:
+```bash
+python3 ~/claude-task-runner/task_runner.py --complete NAME \
+  --agent-id AGENT_ID <<'AGENT_OUTPUT'
+<paste the agent's full result text here>
+AGENT_OUTPUT
+```
+The `--agent-id` flag is **required**. If you already called
+`--set-agent-id` in step 3, `--complete` will use the stored value,
+but always pass `--agent-id` anyway as a safety net.
+
+`--complete` parses the output for `TASK_RESULT: SUCCESS/FAILURE`,
+updates the database, auto-commits on success, and handles iterative
+chains (on_partial_failure, rerun_after).
+
+### Optional: Tail a Background Agent
+If the agent was launched with `run_in_background: true`:
+```bash
+python3 ~/claude-task-runner/task_runner.py --tail NAME -v
+```
+This shows the agent's live output. Requires step 3 to have been done.
+Run this from the Bash tool (it blocks until Ctrl+C or timeout).
+
 ## Creating Tasks
 
 1. Write the prompt to `prompts/NAME` (no extension)
