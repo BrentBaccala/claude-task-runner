@@ -449,6 +449,12 @@ modified since.
   The format is the same jsonl as regular session files (user/assistant
   messages with tool_use and tool_result blocks). `--tail` watches this
   file. The `agentId` comes from the Agent tool's result text.
+- **Token accounting**: The Agent tool reports `total_tokens` in its result,
+  which equals the *last* API request's `input_tokens + cache_creation_input_tokens
+  + cache_read_input_tokens + output_tokens` — i.e., the conversation's ending
+  size, not a sum across all requests. For detailed cost accounting, parse the
+  subagent jsonl directly (each assistant message has a full `usage` object with
+  per-request breakdowns). `cost_report.py` can do this.
 
 ## Playwright MCP
 
