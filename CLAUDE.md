@@ -18,9 +18,7 @@ Claude Code Agent tool:
 2. Use the Agent tool with the prompt      # Claude Code spawns a subagent
 3. task_runner.py --set-agent-id NAME ID   # Record agent ID (enables --tail)
 4. task_runner.py --complete NAME \        # Record result, handle chains
-     --result-status success \
-     --result-value "184/184" \
-     --output-file /tmp/result.txt
+     --output-file /tmp/result.txt        # (parses TASK_RESULT from output)
 ```
 
 Step 3 is optional but enables `--tail` for live monitoring. The agent ID
@@ -66,9 +64,7 @@ task_runner.py --show NAME -vvv         # Include file content (Write/Edit bodie
 # Executing (via Agent tool)
 task_runner.py --prepare NAME           # Mark running, output prompt for Agent tool
 task_runner.py --complete NAME \        # Record completion after Agent returns
-  --result-status success \
-  --result-value "N/M" \
-  --output-file /tmp/result.txt
+  --output-file /tmp/result.txt        # (or pipe output via stdin)
 task_runner.py --set-agent-id NAME ID   # Record agent ID (for --tail)
 task_runner.py --tail NAME              # Tail live output of running agent
 task_runner.py --tail NAME -v           # Include tool invocations

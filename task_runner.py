@@ -1729,20 +1729,17 @@ def prepare_task(db, name):
     return True
 
 
-def complete_task(db, name, result_status=None, result_value=None, agent_output=None):
+def complete_task(db, name, agent_output):
     """Record the completion of a task executed via the Agent tool.
 
-    Called after the Agent tool returns. Updates the run record, handles
-    iterative chains, auto-commits on success, and records deliverables.
-
-    If result_status is not provided, parses agent_output for the TASK_RESULT
-    marker (e.g., "TASK_RESULT: SUCCESS 184/184") to determine status.
+    Called after the Agent tool returns. Parses agent_output for the
+    TASK_RESULT marker (e.g., "TASK_RESULT: SUCCESS 184/184") to determine
+    status. Updates the run record, handles iterative chains, auto-commits
+    on success, and records deliverables.
 
     Args:
         name: Task name
-        result_status: "success" or "failure" (optional — parsed from output if omitted)
-        result_value: Optional N/M value (optional — parsed from output if omitted)
-        agent_output: The agent's text output (for logging/review)
+        agent_output: The agent's text output (required)
     """
     task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
     if task is None:
@@ -1760,20 +1757,16 @@ def complete_task(db, name, result_status=None, result_value=None, agent_output=
         return False
     run_id = run["id"]
 
-    # Parse TASK_RESULT marker from output if status not explicitly provided
-    if result_status is None and agent_output:
-        markers = re.findall(r'TASK_RESULT:[ \t]*(SUCCESS|FAILURE)[ \t]*(.*)', agent_output)
-        if markers:
-            result_status = markers[-1][0].lower()
-            if result_value is None:
-                result_value = markers[-1][1].strip() or None
-        else:
-            result_status = "failure"
-            print(f"Warning: no TASK_RESULT marker found in output — defaulting to failure")
-
-    if result_status is None:
-        print(f"Error: no --result-status and no agent output to parse")
-        return False
+    # Parse TASK_RESULT marker from output
+    result_status = None
+    result_value = None
+    markers = re.findall(r'TASK_RESULT:[ \t]*(SUCCESS|FAILURE)[ \t]*(.*)', agent_output)
+    if markers:
+        result_status = markers[-1][0].lower()
+        result_value = markers[-1][1].strip() or None
+    else:
+        result_status = "failure"
+        print(f"Warning: no TASK_RESULT marker found in output — defaulting to failure")
 
     success = result_status == "success"
     error_reason = None if success else "agent reported task failure"
@@ -1854,9 +1847,6 @@ def main():
     parser.add_argument("--status", action="store_true", help="Show detailed status")
     parser.add_argument("--prepare", metavar="NAME", help="Prepare a task: mark running, output prompt for Agent tool")
     parser.add_argument("--complete", metavar="NAME", help="Record completion of a task run via Agent tool")
-    parser.add_argument("--result-status", metavar="STATUS", choices=["success", "failure"],
-                        help="Result status for --complete (success or failure)")
-    parser.add_argument("--result-value", metavar="VALUE", help="Result value for --complete (e.g., '184/184')")
     parser.add_argument("--output-file", metavar="PATH", help="File containing agent output for --complete")
     parser.add_argument("--pending", action="store_true", help="Show tasks that would run next")
     parser.add_argument("--reset", metavar="NAME", help="Reset a failed/interrupted task")
@@ -1914,19 +1904,21 @@ def main():
         name = resolve_task_name(db, args.complete)
         if name is None:
             sys.exit(1)
-        # Read agent output from --output-file, stdin, or nothing
+        # Read agent output from --output-file or stdin
         agent_output = None
         if args.output_file:
             if os.path.exists(args.output_file):
                 with open(args.output_file) as f:
                     agent_output = f.read()
             else:
-                print(f"Warning: output file not found: {args.output_file}", file=sys.stderr)
+                print(f"Error: output file not found: {args.output_file}", file=sys.stderr)
+                sys.exit(1)
         elif not sys.stdin.isatty():
             agent_output = sys.stdin.read()
-        if not complete_task(db, name, args.result_status,
-                            result_value=args.result_value,
-                            agent_output=agent_output):
+        if not agent_output:
+            print("Error: --complete requires agent output (pipe via stdin or use --output-file)")
+            sys.exit(1)
+        if not complete_task(db, name, agent_output):
             sys.exit(1)
     elif args.pending:
         running = db.execute(
