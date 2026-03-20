@@ -137,6 +137,45 @@ def export_memory(dry_run=False):
     return created
 
 
+SUBAGENT_EXPORT_DIR = os.path.join(PROJECT_DIR, "sessions", "subagents")
+
+
+def export_subagent_logs(dry_run=False):
+    """Hardlink subagent log files from .claude into ~/project/sessions/subagents/.
+
+    Scans ~/.claude/projects/-home-claude/*/subagents/ for agent-*.jsonl files
+    and creates hardlinks preserving the parent session directory structure:
+      sessions/subagents/{parent_session_id}/agent-{agent_id}.jsonl
+    """
+    created = 0
+    for entry in os.listdir(SESSIONS_DIR):
+        subagents_dir = os.path.join(SESSIONS_DIR, entry, "subagents")
+        if not os.path.isdir(subagents_dir):
+            continue
+        # entry is the parent session ID
+        export_dir = os.path.join(SUBAGENT_EXPORT_DIR, entry)
+        for fname in os.listdir(subagents_dir):
+            if not fname.endswith(".jsonl"):
+                continue
+            src = os.path.join(subagents_dir, fname)
+            if not os.path.isfile(src):
+                continue
+            os.makedirs(export_dir, exist_ok=True)
+            dest = os.path.join(export_dir, fname)
+            if os.path.exists(dest):
+                if os.path.samefile(src, dest):
+                    continue
+                # Different file — remove stale link
+                if not dry_run:
+                    os.unlink(dest)
+            action = "WOULD link" if dry_run else "link"
+            print(f"  {action} subagents/{entry[:12]}.../{fname}")
+            if not dry_run:
+                os.link(src, dest)
+            created += 1
+    return created
+
+
 def main():
     dry_run = "--dry-run" in sys.argv or "-n" in sys.argv
 
@@ -256,10 +295,15 @@ def main():
         db.commit()
     db.close()
 
+    # Export subagent logs
+    subagent_created = export_subagent_logs(dry_run)
+
     memory_created = export_memory(dry_run)
 
     print()
     print(f"  {created} sessions linked, {skipped} skipped, {updated_names} names updated")
+    if subagent_created:
+        print(f"  {subagent_created} subagent logs linked")
     if memory_created:
         print(f"  {memory_created} memory files linked")
     if dry_run:
