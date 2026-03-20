@@ -1729,16 +1729,19 @@ def prepare_task(db, name):
     return True
 
 
-def complete_task(db, name, result_status, result_value=None, agent_output=None):
+def complete_task(db, name, result_status=None, result_value=None, agent_output=None):
     """Record the completion of a task executed via the Agent tool.
 
     Called after the Agent tool returns. Updates the run record, handles
     iterative chains, auto-commits on success, and records deliverables.
 
+    If result_status is not provided, parses agent_output for the TASK_RESULT
+    marker (e.g., "TASK_RESULT: SUCCESS 184/184") to determine status.
+
     Args:
         name: Task name
-        result_status: "success" or "failure"
-        result_value: Optional N/M value (e.g., "184/184")
+        result_status: "success" or "failure" (optional — parsed from output if omitted)
+        result_value: Optional N/M value (optional — parsed from output if omitted)
         agent_output: The agent's text output (for logging/review)
     """
     task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
@@ -1756,6 +1759,21 @@ def complete_task(db, name, result_status, result_value=None, agent_output=None)
         print(f"Error: no run found for task '{name}'")
         return False
     run_id = run["id"]
+
+    # Parse TASK_RESULT marker from output if status not explicitly provided
+    if result_status is None and agent_output:
+        markers = re.findall(r'TASK_RESULT:[ \t]*(SUCCESS|FAILURE)[ \t]*(.*)', agent_output)
+        if markers:
+            result_status = markers[-1][0].lower()
+            if result_value is None:
+                result_value = markers[-1][1].strip() or None
+        else:
+            result_status = "failure"
+            print(f"Warning: no TASK_RESULT marker found in output — defaulting to failure")
+
+    if result_status is None:
+        print(f"Error: no --result-status and no agent output to parse")
+        return False
 
     success = result_status == "success"
     error_reason = None if success else "agent reported task failure"
@@ -1895,9 +1913,6 @@ def main():
     elif args.complete:
         name = resolve_task_name(db, args.complete)
         if name is None:
-            sys.exit(1)
-        if not args.result_status:
-            print("Error: --complete requires --result-status (success or failure)")
             sys.exit(1)
         # Read agent output from --output-file, stdin, or nothing
         agent_output = None
