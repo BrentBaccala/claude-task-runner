@@ -1000,11 +1000,19 @@ def show_task(db, name, verbosity=0, all_runs=False):
 
     def show_run_detail(r):
         """Show log, committed files, and analysis for a run."""
-        log_path = r["log_path"]
-        if log_path and os.path.exists(log_path):
-            print(format_log(log_path, verbosity=verbosity))
-        elif r["agent_output"]:
-            print(r["agent_output"])
+        # Prefer the subagent jsonl log (full detail with tool calls)
+        # over the plain-text agent_output (just the summary piped to --complete)
+        subagent_log = None
+        if r["agent_id"]:
+            subagent_log = find_subagent_log(r["agent_id"])
+        if subagent_log:
+            print(format_log(subagent_log, verbosity=verbosity))
+        else:
+            log_path = r["log_path"]
+            if log_path and os.path.exists(log_path):
+                print(format_log(log_path, verbosity=verbosity))
+            elif r["agent_output"]:
+                print(r["agent_output"])
 
         if r["committed_files"]:
             files = json.loads(r["committed_files"])
@@ -1017,9 +1025,10 @@ def show_task(db, name, verbosity=0, all_runs=False):
                         print(f"  {current_repo}:")
                     print(f"    {f['status']} {f['file']}")
 
-        if log_path and os.path.exists(log_path) and verbosity >= 1:
+        analysis_log = subagent_log or (log_path if log_path and os.path.exists(log_path) else None)
+        if analysis_log and verbosity >= 1:
             print("\n=== Session Analysis ===")
-            print_log_analysis(log_path)
+            print_log_analysis(analysis_log)
 
         if r["commit_state"] and verbosity >= 1:
             state = json.loads(r["commit_state"])
