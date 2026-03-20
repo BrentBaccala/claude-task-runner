@@ -2179,13 +2179,27 @@ def main():
         if name:
             kill_task(db, name)
     elif args.backup:
+        # Snapshot .claude file listing for tracking GC deletions
+        snapshots_dir = os.path.join(PROJECT_DIR, "claude-snapshots")
+        os.makedirs(snapshots_dir, exist_ok=True)
+        snapshot_file = os.path.join(snapshots_dir, datetime.now().strftime("%Y%m%d-%H%M") + ".txt")
+        claude_projects = os.path.expanduser("~/.claude/projects/-home-claude")
+        snapshot = subprocess.run(
+            ["find", claude_projects, "-name", "*.jsonl", "-printf", "%T@ %s %p\n"],
+            capture_output=True, text=True,
+        )
+        with open(snapshot_file, "w") as f:
+            f.write(snapshot.stdout)
+        snapshot_count = len(snapshot.stdout.strip().split("\n")) if snapshot.stdout.strip() else 0
+        print(f"Snapshot: {snapshot_count} files -> {os.path.relpath(snapshot_file, PROJECT_DIR)}")
+
         # Export sessions, commit, and push to backup remote
         print("Running export_sessions.py...")
         rc = subprocess.run([sys.executable, os.path.join(SCRIPT_DIR, "export_sessions.py")], cwd=PROJECT_DIR).returncode
         if rc != 0:
             print("Warning: export_sessions.py exited with errors")
         # Stage and commit
-        subprocess.run(["git", "add", "sessions/", "plan-sessions/", "memory/", "tasks.db"], cwd=PROJECT_DIR)
+        subprocess.run(["git", "add", "sessions/", "plan-sessions/", "memory/", "claude-snapshots/", "tasks.db"], cwd=PROJECT_DIR)
         subprocess.run(["git", "add", "-u", "sessions/", "plan-sessions/", "memory/"], cwd=PROJECT_DIR)
         result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=PROJECT_DIR)
         if result.returncode != 0:
