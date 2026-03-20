@@ -107,6 +107,8 @@ Partial name matches work if unambiguous.
 
 **Important**: Do NOT prepare/execute tasks unless explicitly asked.
 Create the task and write its prompt, then let the user decide when to run it.
+Do NOT use `--hold-on-create` unless the user specifically asks for it — create
+tasks as pending (the default) so they're ready to run.
 
 When the user says "continue task N" with new information, use
 `--continue NAME --prompt "..."` to queue the continuation prompt. The task
