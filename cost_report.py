@@ -747,9 +747,16 @@ def filter_sessions_by_date(sessions, db, since=None, until=None, is_task=True):
 
     filtered = []
     for s in sessions:
-        # Determine the file path for this session
+        # Determine the file path(s) to look up in cost_daily.
+        # Task log files live in ~/project/logs/ which isn't indexed,
+        # but the corresponding session file in ~/.claude/projects/ IS indexed.
+        # So for task sessions, look up by session_id -> session file path.
         if is_task:
-            file_path = s.get("log_path")
+            sid = s.get("session_id")
+            if sid:
+                file_path = os.path.join(SESSIONS_DIR, f"{sid}.jsonl")
+            else:
+                file_path = s.get("log_path")
         else:
             sid = s.get("session_id")
             file_path = os.path.join(SESSIONS_DIR, f"{sid}.jsonl") if sid else None
