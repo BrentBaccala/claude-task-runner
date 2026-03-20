@@ -73,6 +73,7 @@ task_runner.py --set-agent-id NAME ID   # Record agent ID (for --tail)
 task_runner.py --tail NAME              # Tail live output of running agent
 task_runner.py --tail NAME -v           # Include tool invocations
 task_runner.py --tail NAME -vv          # Include tool output
+task_runner.py --chat NAME              # Interactive session continuing last agent run
 task_runner.py --continue NAME          # Set up a task for continuation
 task_runner.py --continue NAME --prompt "Focus on X"  # With guidance
 

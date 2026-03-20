@@ -41,6 +41,7 @@ import sys
 from datetime import datetime
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
 
 # Add SCRIPT_DIR to path so we can import project_dir
 if SCRIPT_DIR not in sys.path:
@@ -1540,6 +1541,71 @@ def tail_task(db, name, verbosity=0):
         print("\n(stopped tailing)")
 
 
+def chat_task(db, name):
+    """Open an interactive Claude session continuing a task's last agent run.
+
+    Converts the subagent's jsonl log into a standalone session file
+    (rewrites sessionId, strips subagent markers) and launches
+    `claude --resume` on it. This gives the user a full interactive
+    session with the agent's complete conversation history.
+    """
+    import uuid as _uuid
+
+    task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
+    if task is None:
+        print(f"Error: task '{name}' not found")
+        return False
+
+    # Find the agent_id from the most recent run
+    run = db.execute(
+        "SELECT agent_id FROM runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+        (task["id"],),
+    ).fetchone()
+    agent_id = run["agent_id"] if run else None
+    if not agent_id:
+        print(f"Error: no agent_id recorded for task '{name}'")
+        print("Use --set-agent-id NAME AGENT_ID after running the Agent tool.")
+        return False
+
+    src_path = find_subagent_log(agent_id)
+    if not src_path:
+        print(f"Error: subagent log not found for agent {agent_id}")
+        return False
+
+    # Create a new session by rewriting the subagent log
+    new_session_id = str(_uuid.uuid4())
+    dst_path = os.path.expanduser(
+        f"~/.claude/projects/-home-claude/{new_session_id}.jsonl"
+    )
+
+    with open(src_path) as f:
+        lines = f.readlines()
+
+    out_lines = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        event["sessionId"] = new_session_id
+        event.pop("isSidechain", None)
+        event.pop("agentId", None)
+        event.pop("promptId", None)
+        out_lines.append(json.dumps(event))
+
+    with open(dst_path, "w") as f:
+        f.write("\n".join(out_lines) + "\n")
+
+    print(f"Created session {new_session_id} from agent {agent_id}")
+    print(f"Launching claude --resume ...")
+
+    os.chdir(os.path.expanduser("~"))
+    os.execvp(CLAUDE_BIN, [CLAUDE_BIN, "--resume", new_session_id])
+
+
 def continue_task(db, name, prompt=None):
     """Mark a task for continuation with optional prompt.
 
@@ -1784,6 +1850,7 @@ def main():
     parser.add_argument("--tail", metavar="NAME", help="Tail live output of a running task's subagent")
     parser.add_argument("--set-agent-id", metavar=("NAME", "AGENT_ID"), nargs=2,
                         help="Record the Agent tool's agent ID for --tail")
+    parser.add_argument("--chat", metavar="NAME", help="Interactive session continuing a task's last agent run")
     parser.add_argument("--kill", metavar="NAME", help="Mark a running task as interrupted")
     parser.add_argument("--sync", metavar="NAME", help="Update task status from chat continuation results")
     parser.add_argument("--backup", action="store_true", help="Export sessions, commit changes, and push to backup remote")
@@ -2003,6 +2070,10 @@ def main():
         name = resolve_task_name(db, args.set_agent_id[0])
         if name:
             set_agent_id(db, name, args.set_agent_id[1])
+    elif args.chat:
+        name = resolve_task_name(db, args.chat)
+        if name:
+            chat_task(db, name)
     elif args.kill:
         name = resolve_task_name(db, args.kill)
         if name:
