@@ -1544,10 +1544,14 @@ def tail_task(db, name, verbosity=0):
 def chat_task(db, name):
     """Open an interactive Claude session continuing a task's last agent run.
 
-    Converts the subagent's jsonl log into a standalone session file
-    (rewrites sessionId, strips subagent markers) and launches
-    `claude --resume` on it. This gives the user a full interactive
-    session with the agent's complete conversation history.
+    Copies the subagent's jsonl log into a standalone session file
+    (strips subagent markers but preserves original sessionIds) and
+    launches `claude --resume` on it. This gives the user a full
+    interactive session with the agent's complete conversation history.
+
+    Preserving original sessionIds means cost_report can deduplicate:
+    events whose sessionId doesn't match the filename are copied history
+    and won't be double-counted.
     """
     import uuid as _uuid
 
@@ -1590,7 +1594,9 @@ def chat_task(db, name):
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        event["sessionId"] = new_session_id
+        # Keep the original sessionId so cost_report can deduplicate:
+        # events whose sessionId doesn't match the filename are history
+        # and won't be double-counted.
         event.pop("isSidechain", None)
         event.pop("agentId", None)
         event.pop("promptId", None)
