@@ -999,14 +999,37 @@ def show_task(db, name, verbosity=0, all_runs=False):
         return header
 
     def show_run_detail(r):
-        """Show log, committed files, and analysis for a run."""
-        # Prefer the subagent jsonl log (full detail with tool calls)
-        # over the plain-text agent_output (just the summary piped to --complete)
+        """Show log, committed files, and analysis for a run.
+
+        Verbosity levels for runs with a subagent log:
+          0: agent's final result text (from --complete / agent_output)
+          1: full agent text from subagent log (no tool calls)
+          2: + tool invocations (which tools were called)
+          3: + tool output (results from each tool)
+          4: + full tool input content (Write bodies, Edit strings)
+
+        While running (no agent_output yet), level 0 falls back to level 1.
+        For old stream-json runs (no agent_id), verbosity is passed through
+        to format_log unchanged.
+        """
         subagent_log = None
         if r["agent_id"]:
             subagent_log = find_subagent_log(r["agent_id"])
+
         if subagent_log:
-            print(format_log(subagent_log, verbosity=verbosity))
+            if verbosity == 0:
+                # Show the result summary; fall back to subagent log if no output yet
+                if r["agent_output"]:
+                    print(r["agent_output"])
+                else:
+                    print(format_log(subagent_log, verbosity=0))
+            else:
+                # verbosity 1+ shows subagent log, shifted down by 1:
+                # v=1 → format verbosity 0 (text only)
+                # v=2 → format verbosity 1 (+ tool calls)
+                # v=3 → format verbosity 2 (+ tool output)
+                # v=4 → format verbosity 3 (+ full content)
+                print(format_log(subagent_log, verbosity=verbosity - 1))
         else:
             log_path = r["log_path"]
             if log_path and os.path.exists(log_path):
@@ -1026,7 +1049,7 @@ def show_task(db, name, verbosity=0, all_runs=False):
                     print(f"    {f['status']} {f['file']}")
 
         analysis_log = subagent_log or (log_path if log_path and os.path.exists(log_path) else None)
-        if analysis_log and verbosity >= 1:
+        if analysis_log and verbosity >= 2:
             print("\n=== Session Analysis ===")
             print_log_analysis(analysis_log)
 
@@ -1907,7 +1930,7 @@ def main():
     parser.add_argument("--hold-on-create", action="store_true", help="Create task with status='hold' instead of 'pending'")
     parser.add_argument("--commit", metavar="NAME", help="Commit specific files as artifacts of a task")
     parser.add_argument("files", nargs="*", help="Files to commit (used with --commit)")
-    parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase output verbosity (-v: tool calls, -vv: tool output, -vvv: file content)")
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase output verbosity (-v: full log, -vv: +tool calls, -vvv: +tool output, -vvvv: +file content)")
     parser.add_argument("--all", action="store_true", help="Show all runs in --show (default: latest only)")
     args = parser.parse_args()
 

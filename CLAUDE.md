@@ -55,11 +55,12 @@ task_runner.py --history                # Tasks sorted by last run time, with to
 task_runner.py --summary                # Aggregate stats: runs, time, cost by agent type
 task_runner.py --status                 # Detailed dependency resolution view
 task_runner.py --pending                # Show tasks that would be prepared next
-task_runner.py --show NAME              # Task prompt + run output
-task_runner.py --show NAME --all        # Full detail for every run
-task_runner.py --show NAME -v           # Include tool invocations with timestamps
-task_runner.py --show NAME -vv          # Include tool output
-task_runner.py --show NAME -vvv         # Include file content (Write/Edit bodies)
+task_runner.py --show NAME              # Task prompt + result summary
+task_runner.py --show NAME --all        # All runs (default: latest only)
+task_runner.py --show NAME -v           # Full agent text from subagent log
+task_runner.py --show NAME -vv          # + tool invocations
+task_runner.py --show NAME -vvv         # + tool output
+task_runner.py --show NAME -vvvv        # + full file content (Write/Edit bodies)
 
 # Executing (via Agent tool)
 task_runner.py --prepare NAME           # Mark running, output prompt for Agent tool
