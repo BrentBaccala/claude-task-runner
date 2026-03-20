@@ -1848,6 +1848,11 @@ def complete_task(db, name, agent_output, agent_id=None):
         task = dict(db.execute("SELECT * FROM tasks WHERE id = ?", (task["id"],)).fetchone())
         handle_failure(db, task, error_reason, run_id)
 
+    # Show tasks that are now ready to run (dependencies just became satisfied)
+    ready = get_ready_tasks(db)
+    if ready:
+        print(f"\n  Ready to run: {', '.join(t['name'] for t in ready)}")
+
     return success
 
 

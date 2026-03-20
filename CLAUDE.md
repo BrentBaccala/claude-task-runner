@@ -164,6 +164,17 @@ python3 ~/claude-task-runner/task_runner.py --tail NAME -v
 This shows the agent's live output. Requires step 3 to have been done.
 Run this from the Bash tool (it blocks until Ctrl+C or timeout).
 
+### Step 5: Check for Ready Tasks
+After `--complete` finishes, it prints any tasks that are now ready to
+run (dependencies just became satisfied). **If there are ready tasks,
+immediately start them** by going back to step 1. This is how sequential
+task chains execute — you are the loop that the old `--run-ready` used
+to provide.
+
+If you launched a background agent and are waiting for it to finish,
+you will receive a `<task-notification>` when it completes. When that
+arrives, run step 4 (--complete) and then check for ready tasks.
+
 ## Creating Tasks
 
 1. Write the prompt to `prompts/NAME` (no extension)
