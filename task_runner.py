@@ -567,6 +567,7 @@ def _migrate(db):
         ("runs", "cache_read_tokens", "ALTER TABLE runs ADD COLUMN cache_read_tokens INTEGER"),
         ("runs", "cache_write_tokens", "ALTER TABLE runs ADD COLUMN cache_write_tokens INTEGER"),
         ("runs", "agent_id", "ALTER TABLE runs ADD COLUMN agent_id TEXT"),
+        ("runs", "chat_session_id", "ALTER TABLE runs ADD COLUMN chat_session_id TEXT"),
     ]
 
     applied = 0
@@ -1592,9 +1593,9 @@ def chat_task(db, name):
         print(f"Error: task '{name}' not found")
         return False
 
-    # Find the agent_id from the most recent run
+    # Find the most recent run with an agent_id
     run = db.execute(
-        "SELECT agent_id FROM runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+        "SELECT id, agent_id, chat_session_id FROM runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
         (task["id"],),
     ).fetchone()
     agent_id = run["agent_id"] if run else None
@@ -1603,12 +1604,25 @@ def chat_task(db, name):
         print("Use --set-agent-id NAME AGENT_ID after running the Agent tool.")
         return False
 
+    # If a chat session already exists for this run, resume it
+    chat_session_id = run["chat_session_id"]
+    if chat_session_id:
+        chat_path = os.path.expanduser(
+            f"~/.claude/projects/-home-claude/{chat_session_id}.jsonl"
+        )
+        if os.path.exists(chat_path):
+            print(f"Resuming existing chat session {chat_session_id}")
+            os.chdir(os.path.expanduser("~"))
+            os.execvp(CLAUDE_BIN, [CLAUDE_BIN, "--resume", chat_session_id, "--dangerously-skip-permissions"])
+        else:
+            print(f"Warning: chat session file missing, creating new session")
+
+    # Create a new chat session from the subagent log
     src_path = find_subagent_log(agent_id)
     if not src_path:
         print(f"Error: subagent log not found for agent {agent_id}")
         return False
 
-    # Create a new session by rewriting the subagent log
     new_session_id = str(_uuid.uuid4())
     dst_path = os.path.expanduser(
         f"~/.claude/projects/-home-claude/{new_session_id}.jsonl"
@@ -1637,7 +1651,12 @@ def chat_task(db, name):
     with open(dst_path, "w") as f:
         f.write("\n".join(out_lines) + "\n")
 
-    print(f"Created session {new_session_id} from agent {agent_id}")
+    # Store the chat session ID so subsequent --chat resumes it
+    db.execute("UPDATE runs SET chat_session_id = ? WHERE id = ?",
+               (new_session_id, run["id"]))
+    db.commit()
+
+    print(f"Created chat session {new_session_id} from agent {agent_id}")
     print(f"Launching claude --resume ...")
 
     os.chdir(os.path.expanduser("~"))
