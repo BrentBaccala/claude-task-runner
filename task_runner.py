@@ -1820,6 +1820,26 @@ def complete_task(db, name, agent_output, agent_id=None):
         db.execute("UPDATE runs SET agent_id = ? WHERE id = ?", (agent_id, run_id))
         db.commit()
 
+    # Hardlink subagent log to project sessions dir for backup preservation.
+    # Claude Code may garbage-collect subagent directories aggressively.
+    effective_agent_id = agent_id or run["agent_id"]
+    if effective_agent_id:
+        src = find_subagent_log(effective_agent_id)
+        if src:
+            # Determine parent session ID from the path:
+            # .../projects/-home-claude/{sessionId}/subagents/agent-{agentId}.jsonl
+            parts = src.split("/subagents/")
+            if len(parts) == 2:
+                parent_session = os.path.basename(parts[0])
+                backup_dir = os.path.join(PROJECT_DIR, "sessions", "subagents", parent_session)
+                os.makedirs(backup_dir, exist_ok=True)
+                dest = os.path.join(backup_dir, os.path.basename(src))
+                if not os.path.exists(dest):
+                    try:
+                        os.link(src, dest)
+                    except OSError:
+                        pass  # cross-device or permission error — skip silently
+
     # Parse TASK_RESULT marker from output
     result_status = None
     result_value = None
