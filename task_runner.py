@@ -565,6 +565,7 @@ def _migrate(db):
         ("runs", "output_tokens", "ALTER TABLE runs ADD COLUMN output_tokens INTEGER"),
         ("runs", "cache_read_tokens", "ALTER TABLE runs ADD COLUMN cache_read_tokens INTEGER"),
         ("runs", "cache_write_tokens", "ALTER TABLE runs ADD COLUMN cache_write_tokens INTEGER"),
+        ("runs", "agent_id", "ALTER TABLE runs ADD COLUMN agent_id TEXT"),
     ]
 
     applied = 0
@@ -1194,8 +1195,12 @@ def format_stream_line(line, verbosity=0):
             return None
         # Tool results
         msg = event.get("message", {})
+        content = msg.get("content", [])
+        # Session jsonl may have string content (initial prompt) — skip it
+        if isinstance(content, str):
+            return None
         parts = []
-        for block in msg.get("content", []):
+        for block in content:
             if block.get("type") == "tool_result":
                 content = block.get("content", "")
                 # MCP tool results come as a list of text blocks
@@ -1433,6 +1438,106 @@ def log_task(db, name, verbosity=0):
     print(f"Status: {task['status']}")
     print(f"Log: {log_path}\n")
     print(format_log(log_path, verbosity=verbosity))
+
+
+def set_agent_id(db, name, agent_id):
+    """Record the Agent tool's agent ID on the most recent run.
+
+    Called after the Agent tool returns, so --tail can find the subagent's
+    live log file at ~/.claude/projects/.../subagents/agent-{agentId}.jsonl.
+    """
+    task = db.execute("SELECT id FROM tasks WHERE name = ?", (name,)).fetchone()
+    if task is None:
+        print(f"Error: task '{name}' not found")
+        return False
+    run = db.execute(
+        "SELECT id FROM runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+        (task["id"],),
+    ).fetchone()
+    if run is None:
+        print(f"Error: no run found for task '{name}'")
+        return False
+    db.execute("UPDATE runs SET agent_id = ? WHERE id = ?", (agent_id, run["id"]))
+    db.commit()
+    print(f"Recorded agent_id {agent_id} for task '{name}' (run {run['id']})")
+    return True
+
+
+def find_subagent_log(agent_id):
+    """Find the subagent's jsonl log file by agent ID.
+
+    Searches ~/.claude/projects/*/subagents/agent-{agentId}.jsonl.
+    Returns the path if found, None otherwise.
+    """
+    import glob
+    pattern = os.path.expanduser(
+        f"~/.claude/projects/*/subagents/agent-{agent_id}.jsonl"
+    )
+    matches = glob.glob(pattern)
+    if matches:
+        return matches[0]
+    # Also check one level deeper (session subdirectories)
+    pattern = os.path.expanduser(
+        f"~/.claude/projects/*/*/subagents/agent-{agent_id}.jsonl"
+    )
+    matches = glob.glob(pattern)
+    return matches[0] if matches else None
+
+
+def tail_task(db, name, verbosity=0):
+    """Tail the live log of a running task's subagent.
+
+    Watches the subagent's jsonl file at:
+      ~/.claude/projects/.../subagents/agent-{agentId}.jsonl
+
+    This file is written incrementally as the agent works, so we can
+    tail it in real-time to see tool calls, results, and text output.
+    """
+    import time
+
+    task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
+    if task is None:
+        print(f"Error: task '{name}' not found")
+        return
+
+    # Find the agent_id from the most recent run
+    run = db.execute(
+        "SELECT agent_id FROM runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+        (task["id"],),
+    ).fetchone()
+    agent_id = run["agent_id"] if run else None
+    if not agent_id:
+        print(f"Error: no agent_id recorded for task '{name}'")
+        print("Use --set-agent-id NAME AGENT_ID after starting the Agent tool.")
+        return
+
+    log_path = find_subagent_log(agent_id)
+    if not log_path:
+        print(f"Error: subagent log not found for agent {agent_id}")
+        print("The agent may not have started yet. Try again in a moment.")
+        return
+
+    print(f"Tailing {log_path} (Ctrl+C to stop)\n", flush=True)
+
+    try:
+        with open(log_path) as f:
+            # Print existing content
+            for line in f:
+                formatted = format_stream_line(line, verbosity=verbosity)
+                if formatted:
+                    print(formatted, flush=True)
+
+            # Tail new content
+            while True:
+                line = f.readline()
+                if line:
+                    formatted = format_stream_line(line, verbosity=verbosity)
+                    if formatted:
+                        print(formatted, flush=True)
+                else:
+                    time.sleep(0.3)
+    except KeyboardInterrupt:
+        print("\n(stopped tailing)")
 
 
 def continue_task(db, name, prompt=None):
@@ -1676,6 +1781,9 @@ def main():
     parser.add_argument("--unhold", metavar="NAME", help="Remove hold from a task")
     parser.add_argument("--show", metavar="NAME", help="Show task prompt and run output")
     parser.add_argument("--log", metavar="NAME", help="Show formatted log of a task run")
+    parser.add_argument("--tail", metavar="NAME", help="Tail live output of a running task's subagent")
+    parser.add_argument("--set-agent-id", metavar=("NAME", "AGENT_ID"), nargs=2,
+                        help="Record the Agent tool's agent ID for --tail")
     parser.add_argument("--kill", metavar="NAME", help="Mark a running task as interrupted")
     parser.add_argument("--sync", metavar="NAME", help="Update task status from chat continuation results")
     parser.add_argument("--backup", action="store_true", help="Export sessions, commit changes, and push to backup remote")
@@ -1887,6 +1995,14 @@ def main():
         name = resolve_task_name(db, args.log)
         if name:
             log_task(db, name, verbosity=args.verbose)
+    elif args.tail:
+        name = resolve_task_name(db, args.tail)
+        if name:
+            tail_task(db, name, verbosity=args.verbose)
+    elif args.set_agent_id:
+        name = resolve_task_name(db, args.set_agent_id[0])
+        if name:
+            set_agent_id(db, name, args.set_agent_id[1])
     elif args.kill:
         name = resolve_task_name(db, args.kill)
         if name:

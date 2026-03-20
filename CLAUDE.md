@@ -443,8 +443,11 @@ modified since.
   repos under `~/`, excluding infrastructure files and build artifacts.
 - **Backward compatibility**: Old stream-json logs from `claude --print` runs
   are still viewable with `--show` and `--log`. New runs store plain text.
-- **No subprocesses**: The task runner no longer spawns `claude` processes.
-  There are no PIDs to track, no process trees to kill, no live logs to tail.
+- **Subagent logs**: Claude Code writes subagent logs incrementally (in
+  real-time) to `~/.claude/projects/{project}/{sessionId}/subagents/agent-{agentId}.jsonl`.
+  The format is the same jsonl as regular session files (user/assistant
+  messages with tool_use and tool_result blocks). `--tail` watches this
+  file. The `agentId` comes from the Agent tool's result text.
 
 ## Playwright MCP
 
