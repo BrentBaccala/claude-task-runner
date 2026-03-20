@@ -455,6 +455,10 @@ modified since.
   size, not a sum across all requests. For detailed cost accounting, parse the
   subagent jsonl directly (each assistant message has a full `usage` object with
   per-request breakdowns). `cost_report.py` can do this.
+- **Cost deduplication**: `--chat` copies the subagent log into a new session
+  file and appends chat events. `/branch` forks do the same. If scanning
+  multiple session files, deduplicate by event `uuid` to avoid double-counting
+  tokens that were only charged once.
 
 ## Playwright MCP
 
