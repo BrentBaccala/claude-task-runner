@@ -99,9 +99,36 @@ def get_session_id_for_file(file_path):
     For top-level session files: the session ID is the filename (without .jsonl).
     For subagent files: the session ID is the parent directory name (the parent
     session's ID), because subagent events have sessionId set to the parent session.
+    For stream-json .log files: session ID is not used for filtering (each file
+    is self-contained), but we extract it from the init event for the DB record.
     """
     basename = os.path.basename(file_path)
-    if '/subagents/' in file_path:
+    if _is_stream_json_log(file_path):
+        # Stream-json log — try to extract session_id from init event
+        try:
+            with open(file_path, errors='replace') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    if event.get("type") == "system" and event.get("subtype") == "init":
+                        sid = event.get("session_id")
+                        if sid:
+                            return sid
+                    # Only check first few lines
+                    if event.get("type") == "assistant":
+                        break
+        except OSError:
+            pass
+        # Fallback: use filename without extension
+        return os.path.splitext(basename)[0]
+    elif '/subagents/' in file_path:
         # Parent dir of subagents/ is the session dir named by session ID
         parts = file_path.split('/')
         try:
@@ -114,7 +141,12 @@ def get_session_id_for_file(file_path):
 
 
 def scan_session_files():
-    """Find all .jsonl session files to index.
+    """Find all session/log files to index.
+
+    Scans three locations:
+    1. Top-level session files: ~/.claude/projects/-home-claude/*.jsonl
+    2. Subagent files: ~/.claude/projects/-home-claude/*/subagents/agent-*.jsonl
+    3. Old task runner logs: ~/project/logs/*.log (stream-json from claude --print)
 
     Returns list of file paths.
     """
@@ -125,18 +157,32 @@ def scan_session_files():
     # Subagent files
     pattern2 = os.path.join(SESSIONS_DIR, "*/subagents/agent-*.jsonl")
     files.extend(glob_mod.glob(pattern2))
+    # Old task runner stream-json logs
+    pattern3 = os.path.join(LOGS_DIR, "*.log")
+    files.extend(glob_mod.glob(pattern3))
     return files
 
 
-def parse_file_for_daily(file_path, session_id):
-    """Parse a session file and return daily token buckets.
+def _is_stream_json_log(file_path):
+    """Check if a file is a stream-json log (old claude --print format) vs session jsonl."""
+    return file_path.endswith('.log')
 
-    Only counts assistant events whose sessionId matches session_id.
+
+def parse_file_for_daily(file_path, session_id):
+    """Parse a session/log file and return daily token buckets.
+
+    For session .jsonl files: only counts assistant events whose sessionId
+    matches session_id (deduplicates events copied by --chat and /branch).
+
+    For stream-json .log files: counts all assistant events (each file is
+    self-contained, no sessionId dedup needed).
+
     Deduplicates by message ID within the file.
 
     Returns: list of (date, model, input_tokens, output_tokens,
              cache_read_tokens, cache_write_tokens, event_count)
     """
+    is_log = _is_stream_json_log(file_path)
     msg_data = {}  # msg_id -> (date, model, usage)
 
     try:
@@ -150,11 +196,16 @@ def parse_file_for_daily(file_path, session_id):
                 except json.JSONDecodeError:
                     continue
 
+                if not isinstance(event, dict):
+                    continue
                 if event.get("type") != "assistant":
                     continue
 
-                # Filter by sessionId
-                if event.get("sessionId") != session_id:
+                # For session jsonl files, filter by sessionId to deduplicate
+                # events copied by --chat and /branch.
+                # Stream-json .log files don't have sessionId — each file is
+                # self-contained, so no filtering needed.
+                if not is_log and event.get("sessionId") != session_id:
                     continue
 
                 msg = event.get("message", {})
@@ -748,24 +799,30 @@ def filter_sessions_by_date(sessions, db, since=None, until=None, is_task=True):
     filtered = []
     for s in sessions:
         # Determine the file path(s) to look up in cost_daily.
-        # Task log files live in ~/project/logs/ which isn't indexed,
-        # but the corresponding session file in ~/.claude/projects/ IS indexed.
-        # So for task sessions, look up by session_id -> session file path.
+        # For task sessions, try both: the session file in ~/.claude/projects/
+        # (new Agent-tool runs) AND the log file in ~/project/logs/ (old
+        # claude --print runs). One or both may have entries in cost_daily.
+        # For interactive sessions, use the session file path.
+        date_tokens = {}
         if is_task:
+            # Try session file first (new runs)
             sid = s.get("session_id")
             if sid:
-                file_path = os.path.join(SESSIONS_DIR, f"{sid}.jsonl")
-            else:
-                file_path = s.get("log_path")
+                session_path = os.path.join(SESSIONS_DIR, f"{sid}.jsonl")
+                date_tokens = query_daily_by_file(db, session_path, since, until)
+            # Also try log file (old runs indexed from ~/project/logs/)
+            log_path = s.get("log_path")
+            if log_path and not date_tokens:
+                date_tokens = query_daily_by_file(db, log_path, since, until)
+            # If neither found, try the other way (merge if both have data)
+            if sid and log_path and not date_tokens:
+                pass  # Already tried both
+            file_path = os.path.join(SESSIONS_DIR, f"{sid}.jsonl") if sid else log_path
         else:
             sid = s.get("session_id")
             file_path = os.path.join(SESSIONS_DIR, f"{sid}.jsonl") if sid else None
-
-        if file_path:
-            # Re-query tokens for this file within the date range
-            date_tokens = query_daily_by_file(db, file_path, since, until)
-        else:
-            date_tokens = {}
+            if file_path:
+                date_tokens = query_daily_by_file(db, file_path, since, until)
 
         if not date_tokens:
             # No tokens in range — skip this session entirely
@@ -776,13 +833,23 @@ def filter_sessions_by_date(sessions, db, since=None, until=None, is_task=True):
         s_copy["assistant_tokens"] = date_tokens
 
         # Get the earliest date from the filtered tokens to use as the
-        # effective start date for this session in the filtered view
+        # effective start date for this session in the filtered view.
+        # Use file_session_id to find across both session files and log files.
         earliest_date = None
         try:
-            row = db.execute("""
-                SELECT MIN(date) FROM cost_daily
-                WHERE file_path = ? AND date >= ? AND date <= ?
-            """, (file_path, since or '0000-01-01', until or '9999-12-31')).fetchone()
+            lookup_sid = s.get("session_id") if is_task else sid
+            if lookup_sid:
+                row = db.execute("""
+                    SELECT MIN(date) FROM cost_daily
+                    WHERE file_session_id = ? AND date >= ? AND date <= ?
+                """, (lookup_sid, since or '0000-01-01', until or '9999-12-31')).fetchone()
+            elif file_path:
+                row = db.execute("""
+                    SELECT MIN(date) FROM cost_daily
+                    WHERE file_path = ? AND date >= ? AND date <= ?
+                """, (file_path, since or '0000-01-01', until or '9999-12-31')).fetchone()
+            else:
+                row = None
             if row and row[0]:
                 earliest_date = row[0]
         except sqlite3.OperationalError:
