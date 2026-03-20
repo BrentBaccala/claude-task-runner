@@ -14,13 +14,19 @@ The task runner is a management/tracking CLI. Execution happens through the
 Claude Code Agent tool:
 
 ```
-1. task_runner.py --prepare NAME     # Mark running, output prompt to stdout
-2. Use the Agent tool with the prompt  # Claude Code spawns a subagent
-3. task_runner.py --complete NAME \   # Record result, handle chains
+1. task_runner.py --prepare NAME           # Mark running, output prompt
+2. Use the Agent tool with the prompt      # Claude Code spawns a subagent
+3. task_runner.py --set-agent-id NAME ID   # Record agent ID (enables --tail)
+4. task_runner.py --complete NAME \        # Record result, handle chains
      --result-status success \
      --result-value "184/184" \
      --output-file /tmp/result.txt
 ```
+
+Step 3 is optional but enables `--tail` for live monitoring. The agent ID
+comes from the Agent tool's result (the `agentId:` line). For background
+agents, record it immediately after launch so `--tail` works while the
+agent is still running.
 
 The orchestrating Claude Code session (you, in an interactive chat) handles
 the Agent tool invocation. The task runner handles everything else: prompt
@@ -63,6 +69,10 @@ task_runner.py --complete NAME \        # Record completion after Agent returns
   --result-status success \
   --result-value "N/M" \
   --output-file /tmp/result.txt
+task_runner.py --set-agent-id NAME ID   # Record agent ID (for --tail)
+task_runner.py --tail NAME              # Tail live output of running agent
+task_runner.py --tail NAME -v           # Include tool invocations
+task_runner.py --tail NAME -vv          # Include tool output
 task_runner.py --continue NAME          # Set up a task for continuation
 task_runner.py --continue NAME --prompt "Focus on X"  # With guidance
 
@@ -369,7 +379,16 @@ task_runner.py --show my-task -vvv
 
 # Aggregate stats
 task_runner.py --summary
+
+# Monitor a running task in real-time
+task_runner.py --tail my-task       # text output only
+task_runner.py --tail my-task -v    # include tool invocations
+task_runner.py --tail my-task -vv   # include tool output
 ```
+
+`--tail` watches the subagent's live log file at
+`~/.claude/projects/.../subagents/agent-{agentId}.jsonl`. Requires
+`--set-agent-id` to have been called first.
 
 Run headers in `--show` include the result value:
 ```
