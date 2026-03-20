@@ -4,6 +4,12 @@
 Reports official costs where available, estimates costs for sessions without
 result events, and cross-validates pricing model against official costs.
 
+Incremental processing: token counts are cached in cost_daily/cost_file_state
+tables in tasks.db. Only changed files are re-parsed on subsequent runs.
+
+All dates are in UTC (derived from ISO 8601 timestamps with Z suffix in
+session files). The --since/--until filters operate on these UTC dates.
+
 Usage:
     python3 cost_report.py                    # Summary + by-task
     python3 cost_report.py --summary          # Grand total one-liner
@@ -14,14 +20,17 @@ Usage:
     python3 cost_report.py --validate         # Cross-validate pricing model
     python3 cost_report.py --all              # All reports
     python3 cost_report.py --json             # JSON output
+    python3 cost_report.py --reindex          # Force full re-index of all files
 """
 
 import argparse
+import glob as glob_mod
 import json
 import os
 import sqlite3
 import statistics
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime
 
@@ -57,15 +66,214 @@ def calculate_cost(model, input_tokens, output_tokens, cache_read_tokens, cache_
     ) / 1_000_000
 
 
+# ── Incremental indexing ──────────────────────────────────────────────
+
+def ensure_cost_tables(db):
+    """Create cost_daily and cost_file_state tables if they don't exist."""
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS cost_daily (
+            file_path TEXT NOT NULL,
+            file_session_id TEXT,
+            date TEXT NOT NULL,
+            model TEXT NOT NULL,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            cache_read_tokens INTEGER DEFAULT 0,
+            cache_write_tokens INTEGER DEFAULT 0,
+            event_count INTEGER DEFAULT 0,
+            PRIMARY KEY (file_path, date, model)
+        );
+
+        CREATE TABLE IF NOT EXISTS cost_file_state (
+            file_path TEXT PRIMARY KEY,
+            file_size INTEGER,
+            file_mtime REAL,
+            last_processed TEXT
+        );
+    """)
+
+
+def get_session_id_for_file(file_path):
+    """Derive the session ID that should be used to filter events in this file.
+
+    For top-level session files: the session ID is the filename (without .jsonl).
+    For subagent files: the session ID is the parent directory name (the parent
+    session's ID), because subagent events have sessionId set to the parent session.
+    """
+    basename = os.path.basename(file_path)
+    if '/subagents/' in file_path:
+        # Parent dir of subagents/ is the session dir named by session ID
+        parts = file_path.split('/')
+        try:
+            sub_idx = parts.index('subagents')
+            return parts[sub_idx - 1]
+        except (ValueError, IndexError):
+            return basename.replace('.jsonl', '')
+    else:
+        return basename.replace('.jsonl', '')
+
+
+def scan_session_files():
+    """Find all .jsonl session files to index.
+
+    Returns list of file paths.
+    """
+    files = []
+    # Top-level session files
+    pattern1 = os.path.join(SESSIONS_DIR, "*.jsonl")
+    files.extend(glob_mod.glob(pattern1))
+    # Subagent files
+    pattern2 = os.path.join(SESSIONS_DIR, "*/subagents/agent-*.jsonl")
+    files.extend(glob_mod.glob(pattern2))
+    return files
+
+
+def parse_file_for_daily(file_path, session_id):
+    """Parse a session file and return daily token buckets.
+
+    Only counts assistant events whose sessionId matches session_id.
+    Deduplicates by message ID within the file.
+
+    Returns: list of (date, model, input_tokens, output_tokens,
+             cache_read_tokens, cache_write_tokens, event_count)
+    """
+    msg_data = {}  # msg_id -> (date, model, usage)
+
+    try:
+        with open(file_path, errors='replace') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if event.get("type") != "assistant":
+                    continue
+
+                # Filter by sessionId
+                if event.get("sessionId") != session_id:
+                    continue
+
+                msg = event.get("message", {})
+                mid = msg.get("id")
+                usage = msg.get("usage")
+                model = msg.get("model", "unknown")
+
+                if not mid or not usage or model not in PRICING:
+                    continue
+
+                ts = event.get("timestamp")
+                date = get_date(ts) if ts else None
+                if not date:
+                    continue
+
+                msg_data[mid] = (date, model, usage)
+    except OSError:
+        return []
+
+    # Aggregate into daily buckets
+    buckets = defaultdict(lambda: {
+        "input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "count": 0
+    })
+
+    for mid, (date, model, usage) in msg_data.items():
+        key = (date, model)
+        b = buckets[key]
+        b["input"] += usage.get("input_tokens", 0)
+        b["output"] += usage.get("output_tokens", 0)
+        b["cache_read"] += usage.get("cache_read_input_tokens", 0)
+        b["cache_write"] += usage.get("cache_creation_input_tokens", 0)
+        b["count"] += 1
+
+    result = []
+    for (date, model), b in buckets.items():
+        result.append((date, model, b["input"], b["output"],
+                       b["cache_read"], b["cache_write"], b["count"]))
+    return result
+
+
+def update_cost_index(db, force=False):
+    """Incrementally index all session files into cost_daily.
+
+    Returns (files_processed, files_skipped, files_removed).
+    """
+    ensure_cost_tables(db)
+
+    all_files = scan_session_files()
+    all_file_set = set(all_files)
+
+    # Remove entries for files that no longer exist
+    existing_paths = [r[0] for r in db.execute("SELECT file_path FROM cost_file_state").fetchall()]
+    removed = 0
+    for path in existing_paths:
+        if path not in all_file_set:
+            db.execute("DELETE FROM cost_daily WHERE file_path = ?", (path,))
+            db.execute("DELETE FROM cost_file_state WHERE file_path = ?", (path,))
+            removed += 1
+
+    # Check each file
+    processed = 0
+    skipped = 0
+
+    for file_path in all_files:
+        try:
+            stat = os.stat(file_path)
+        except OSError:
+            continue
+
+        file_size = stat.st_size
+        file_mtime = stat.st_mtime
+
+        if not force:
+            row = db.execute(
+                "SELECT file_size, file_mtime FROM cost_file_state WHERE file_path = ?",
+                (file_path,)
+            ).fetchone()
+            if row and row[0] == file_size and row[1] == file_mtime:
+                skipped += 1
+                continue
+
+        # File changed or new — re-parse
+        session_id = get_session_id_for_file(file_path)
+
+        db.execute("DELETE FROM cost_daily WHERE file_path = ?", (file_path,))
+
+        daily_rows = parse_file_for_daily(file_path, session_id)
+        for date, model, inp, out, crd, cwr, count in daily_rows:
+            db.execute("""
+                INSERT OR REPLACE INTO cost_daily
+                (file_path, file_session_id, date, model,
+                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                 event_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (file_path, session_id, date, model, inp, out, crd, cwr, count))
+
+        db.execute("""
+            INSERT OR REPLACE INTO cost_file_state
+            (file_path, file_size, file_mtime, last_processed)
+            VALUES (?, ?, ?, ?)
+        """, (file_path, file_size, file_mtime, datetime.now(tz=None).isoformat()))
+
+        processed += 1
+
+    db.commit()
+    return processed, skipped, removed
+
+
+# ── Original parse_log (still used for result events and --validate) ──
+
 def parse_log(path):
     """Parse a stream-json log file, extracting result event data and assistant event tokens.
 
     Returns a dict with:
-        result: dict or None — from the last result event
+        result: dict or None -- from the last result event
             total_cost_usd, num_turns, duration_ms, session_id,
             model_usage: {model: {inputTokens, outputTokens, cacheRead, cacheWrite, costUSD}}
         assistant_tokens: {model: {input, output, cache_read, cache_write, count}}
-            — deduped by message ID, summed per model
+            -- deduped by message ID, summed per model
         first_ts, last_ts: ISO timestamps from assistant events
     """
     if not path or not os.path.exists(path):
@@ -234,8 +442,44 @@ def estimate_cost(session, multipliers):
     return total_estimated, primary_model
 
 
-def collect_task_sessions():
+# ── Session data collection (uses cost_daily for token data) ──────────
+
+def _build_assistant_tokens_from_daily(db, file_path):
+    """Build assistant_tokens dict from cost_daily for a given file_path.
+
+    Returns: {model: {input, output, cache_read, cache_write, count}}
+    """
+    rows = db.execute("""
+        SELECT model, SUM(input_tokens), SUM(output_tokens),
+               SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(event_count)
+        FROM cost_daily WHERE file_path = ?
+        GROUP BY model
+    """, (file_path,)).fetchall()
+
+    result = {}
+    for model, inp, out, crd, cwr, cnt in rows:
+        result[model] = {
+            "input": inp or 0, "output": out or 0,
+            "cache_read": crd or 0, "cache_write": cwr or 0,
+            "count": cnt or 0,
+        }
+    return result
+
+
+def _get_first_last_ts_from_daily(db, file_path):
+    """Get earliest and latest dates from cost_daily for a file."""
+    row = db.execute("""
+        SELECT MIN(date), MAX(date) FROM cost_daily WHERE file_path = ?
+    """, (file_path,)).fetchone()
+    if row and row[0]:
+        return row[0] + "T00:00:00Z", row[1] + "T23:59:59Z"
+    return None, None
+
+
+def collect_task_sessions(db=None):
     """Collect session data for all task runs from the database.
+
+    If db is provided and cost_daily is populated, uses cached token data.
 
     Returns list of dicts with:
         task_name, agent_type, run_id, log_path, db_cost, session_id,
@@ -244,7 +488,9 @@ def collect_task_sessions():
     if not os.path.exists(DB_PATH):
         return []
 
-    db = sqlite3.connect(DB_PATH)
+    own_db = db is None
+    if own_db:
+        db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
     rows = db.execute("""
         SELECT r.id as run_id, r.log_path, r.cost_usd, r.session_id,
@@ -255,12 +501,40 @@ def collect_task_sessions():
         JOIN tasks t ON r.task_id = t.id
         ORDER BY r.id
     """).fetchall()
-    db.close()
+
+    # Check if cost_daily table exists
+    has_cache = False
+    try:
+        db.execute("SELECT 1 FROM cost_daily LIMIT 1")
+        has_cache = True
+    except sqlite3.OperationalError:
+        pass
 
     sessions = []
     for row in rows:
         log_path = row["log_path"]
-        parsed = parse_log(log_path) if log_path else None
+
+        if has_cache and log_path and os.path.exists(log_path):
+            # Use cached token data from cost_daily
+            assistant_tokens = _build_assistant_tokens_from_daily(db, log_path)
+            first_ts, last_ts = _get_first_last_ts_from_daily(db, log_path)
+
+            # Still need to parse for result events (only in log files with results)
+            # We parse_log only if we need the result data
+            parsed = parse_log(log_path) if log_path else None
+            result = parsed["result"] if parsed else None
+            if not first_ts and parsed:
+                first_ts = parsed["first_ts"]
+                last_ts = parsed["last_ts"]
+            # If cache had no tokens but parse_log did, use parse_log's
+            if not assistant_tokens and parsed and parsed["assistant_tokens"]:
+                assistant_tokens = parsed["assistant_tokens"]
+        else:
+            parsed = parse_log(log_path) if log_path else None
+            result = parsed["result"] if parsed else None
+            assistant_tokens = parsed["assistant_tokens"] if parsed else {}
+            first_ts = parsed["first_ts"] if parsed else None
+            last_ts = parsed["last_ts"] if parsed else None
 
         session = {
             "task_name": row["task_name"],
@@ -270,27 +544,34 @@ def collect_task_sessions():
             "db_cost": row["cost_usd"],
             "session_id": row["session_id"],
             "started_at": row["started_at"],
-            "result": parsed["result"] if parsed else None,
-            "assistant_tokens": parsed["assistant_tokens"] if parsed else {},
-            "first_ts": parsed["first_ts"] if parsed else None,
-            "last_ts": parsed["last_ts"] if parsed else None,
+            "result": result,
+            "assistant_tokens": assistant_tokens,
+            "first_ts": first_ts,
+            "last_ts": last_ts,
         }
         sessions.append(session)
+
+    if own_db:
+        db.close()
 
     return sessions
 
 
-def collect_interactive_sessions():
+def collect_interactive_sessions(db=None):
     """Collect session data for interactive (non-task) sessions.
+
+    If db is provided and cost_daily is populated, uses cached token data.
 
     Returns list of dicts with:
         session_id, display_name, custom_title, first_ts, last_ts,
-        assistant_tokens, result (always None)
+        assistant_tokens, result (always None for interactive)
     """
     if not os.path.exists(DB_PATH):
         return []
 
-    db = sqlite3.connect(DB_PATH)
+    own_db = db is None
+    if own_db:
+        db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
 
     # Get task session IDs to exclude
@@ -307,7 +588,14 @@ def collect_interactive_sessions():
         WHERE is_task = 0 AND has_messages = 1 AND deleted = 0
         ORDER BY first_ts
     """).fetchall()
-    db.close()
+
+    # Check if cost_daily table exists
+    has_cache = False
+    try:
+        db.execute("SELECT 1 FROM cost_daily LIMIT 1")
+        has_cache = True
+    except sqlite3.OperationalError:
+        pass
 
     sessions = []
     for row in rows:
@@ -316,18 +604,38 @@ def collect_interactive_sessions():
             continue
 
         path = os.path.join(SESSIONS_DIR, f"{sid}.jsonl")
-        parsed = parse_log(path) if os.path.exists(path) else None
+
+        if has_cache and os.path.exists(path):
+            assistant_tokens = _build_assistant_tokens_from_daily(db, path)
+            first_ts, last_ts = _get_first_last_ts_from_daily(db, path)
+            # For interactive sessions, result events come from parse_log
+            parsed = parse_log(path) if os.path.exists(path) else None
+            result = parsed["result"] if parsed else None
+            if not first_ts:
+                first_ts = parsed["first_ts"] if parsed else row["first_ts"]
+                last_ts = parsed["last_ts"] if parsed else row["last_ts"]
+            if not assistant_tokens and parsed and parsed["assistant_tokens"]:
+                assistant_tokens = parsed["assistant_tokens"]
+        else:
+            parsed = parse_log(path) if os.path.exists(path) else None
+            assistant_tokens = parsed["assistant_tokens"] if parsed else {}
+            result = parsed["result"] if parsed else None
+            first_ts = parsed["first_ts"] if parsed else row["first_ts"]
+            last_ts = parsed["last_ts"] if parsed else row["last_ts"]
 
         session = {
             "session_id": sid,
             "display_name": row["display_name"] or row["custom_title"] or sid[:12],
             "custom_title": row["custom_title"],
-            "first_ts": parsed["first_ts"] if parsed else row["first_ts"],
-            "last_ts": parsed["last_ts"] if parsed else row["last_ts"],
-            "assistant_tokens": parsed["assistant_tokens"] if parsed else {},
-            "result": parsed["result"] if parsed else None,
+            "first_ts": first_ts,
+            "last_ts": last_ts,
+            "assistant_tokens": assistant_tokens,
+            "result": result,
         }
         sessions.append(session)
+
+    if own_db:
+        db.close()
 
     return sessions
 
@@ -358,6 +666,140 @@ def get_date(ts):
         return dt.strftime("%Y-%m-%d")
     except (ValueError, TypeError):
         return None
+
+
+# ── Per-message date filtering via cost_daily ─────────────────────────
+
+def query_daily_by_date_range(db, since=None, until=None):
+    """Query cost_daily aggregated by date and model within a date range.
+
+    Returns list of (date, model, input_tokens, output_tokens,
+                     cache_read_tokens, cache_write_tokens, event_count)
+    """
+    conditions = []
+    params = []
+    if since:
+        conditions.append("date >= ?")
+        params.append(since)
+    if until:
+        conditions.append("date <= ?")
+        params.append(until)
+
+    where = " WHERE " + " AND ".join(conditions) if conditions else ""
+
+    rows = db.execute(f"""
+        SELECT date, model, SUM(input_tokens), SUM(output_tokens),
+               SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(event_count)
+        FROM cost_daily
+        {where}
+        GROUP BY date, model
+        ORDER BY date, model
+    """, params).fetchall()
+    return rows
+
+
+def query_daily_by_file(db, file_path, since=None, until=None):
+    """Query cost_daily for a specific file within a date range.
+
+    Returns {model: {input, output, cache_read, cache_write, count}}
+    """
+    conditions = ["file_path = ?"]
+    params = [file_path]
+    if since:
+        conditions.append("date >= ?")
+        params.append(since)
+    if until:
+        conditions.append("date <= ?")
+        params.append(until)
+
+    where = " AND ".join(conditions)
+    rows = db.execute(f"""
+        SELECT model, SUM(input_tokens), SUM(output_tokens),
+               SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(event_count)
+        FROM cost_daily
+        WHERE {where}
+        GROUP BY model
+    """, params).fetchall()
+
+    result = {}
+    for model, inp, out, crd, cwr, cnt in rows:
+        result[model] = {
+            "input": inp or 0, "output": out or 0,
+            "cache_read": crd or 0, "cache_write": cwr or 0,
+            "count": cnt or 0,
+        }
+    return result
+
+
+def filter_sessions_by_date(sessions, db, since=None, until=None, is_task=True):
+    """Filter and adjust sessions based on per-message date filtering.
+
+    When since/until are specified, re-compute assistant_tokens from cost_daily
+    to only include tokens from events within the date range. Sessions are
+    included only if they have tokens in the date range. The result event
+    (official cost) is preserved only if the session's start date falls within
+    the range; otherwise it's cleared so the session uses estimated costs.
+
+    Returns filtered list of sessions.
+    """
+    if not since and not until:
+        return sessions
+
+    filtered = []
+    for s in sessions:
+        # Determine the file path for this session
+        if is_task:
+            file_path = s.get("log_path")
+        else:
+            sid = s.get("session_id")
+            file_path = os.path.join(SESSIONS_DIR, f"{sid}.jsonl") if sid else None
+
+        if file_path:
+            # Re-query tokens for this file within the date range
+            date_tokens = query_daily_by_file(db, file_path, since, until)
+        else:
+            date_tokens = {}
+
+        if not date_tokens:
+            # No tokens in range — skip this session entirely
+            continue
+
+        # Create a copy with filtered tokens
+        s_copy = dict(s)
+        s_copy["assistant_tokens"] = date_tokens
+
+        # Get the earliest date from the filtered tokens to use as the
+        # effective start date for this session in the filtered view
+        earliest_date = None
+        try:
+            row = db.execute("""
+                SELECT MIN(date) FROM cost_daily
+                WHERE file_path = ? AND date >= ? AND date <= ?
+            """, (file_path, since or '0000-01-01', until or '9999-12-31')).fetchone()
+            if row and row[0]:
+                earliest_date = row[0]
+        except sqlite3.OperationalError:
+            pass
+
+        if earliest_date:
+            s_copy["first_ts"] = earliest_date + "T00:00:00Z"
+            if is_task:
+                s_copy["started_at"] = earliest_date + "T00:00:00Z"
+
+        # Check if the session's result event date falls within range
+        # If not, clear it so costs are estimated from the filtered tokens
+        session_date = get_date(s.get("started_at") or s.get("first_ts"))
+        result_in_range = True
+        if since and session_date and session_date < since:
+            result_in_range = False
+        if until and session_date and session_date > until:
+            result_in_range = False
+        if not result_in_range:
+            s_copy["result"] = None
+
+        filtered.append(s_copy)
+
+    return filtered
 
 
 # ── Report formatters ──────────────────────────────────────────────────
@@ -573,8 +1015,14 @@ def report_by_model(task_sessions, interactive_sessions, multipliers, as_json=Fa
     return None
 
 
-def report_by_date(task_sessions, interactive_sessions, multipliers, as_json=False):
-    """Daily cost breakdown."""
+def report_by_date(task_sessions, interactive_sessions, multipliers,
+                   db=None, since=None, until=None, as_json=False):
+    """Daily cost breakdown.
+
+    Uses the standard session-level approach: each session's cost is assigned
+    to its start date. The --since/--until filtering uses per-message date
+    bucketing from cost_daily for accurate date-range filtering.
+    """
     dates = defaultdict(lambda: {"official": 0, "estimated": 0, "sessions": 0})
 
     for s in task_sessions:
@@ -1000,20 +1448,25 @@ def report_validate(task_sessions, as_json=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Claude API cost calculator for task runner and interactive sessions."
+        description="Claude API cost calculator for task runner and interactive sessions. "
+                    "All dates are UTC (from ISO 8601 timestamps in session files)."
     )
     parser.add_argument("--summary", action="store_true", help="Grand total one-liner")
     parser.add_argument("--by-task", action="store_true", help="Cost per task")
     parser.add_argument("--by-model", action="store_true", help="Aggregate by model")
-    parser.add_argument("--by-date", action="store_true", help="Daily cost breakdown")
+    parser.add_argument("--by-date", action="store_true", help="Daily cost breakdown (UTC dates)")
     parser.add_argument("--interactive", action="store_true", help="Interactive session costs")
     parser.add_argument("--validate", action="store_true", help="Cross-validate pricing model")
     parser.add_argument("--detail", action="store_true", help="Per-run detail with token counts")
     parser.add_argument("--all", action="store_true", help="All reports")
     parser.add_argument("--task", type=str, help="Filter to a specific task name")
-    parser.add_argument("--since", type=str, help="Filter to sessions since DATE (YYYY-MM-DD)")
-    parser.add_argument("--until", type=str, help="Filter to sessions before DATE (YYYY-MM-DD)")
+    parser.add_argument("--since", type=str,
+                        help="Filter to events since DATE (YYYY-MM-DD, UTC)")
+    parser.add_argument("--until", type=str,
+                        help="Filter to events until DATE (YYYY-MM-DD, UTC)")
     parser.add_argument("--json", action="store_true", help="JSON output")
+    parser.add_argument("--reindex", action="store_true",
+                        help="Force full re-index of all session files")
 
     args = parser.parse_args()
 
@@ -1028,29 +1481,26 @@ def main():
         args.summary = args.by_task = args.by_model = args.by_date = True
         args.interactive = args.validate = True
 
-    # Collect data
-    task_sessions = collect_task_sessions()
-    interactive_sessions = collect_interactive_sessions()
+    # Open database and run incremental indexing
+    db = sqlite3.connect(DB_PATH)
 
-    # Apply --since/--until filters
-    if args.since:
-        task_sessions = [
-            s for s in task_sessions
-            if (get_date(s.get("started_at") or s.get("first_ts")) or "") >= args.since
-        ]
-        interactive_sessions = [
-            s for s in interactive_sessions
-            if (get_date(s.get("first_ts")) or "") >= args.since
-        ]
-    if args.until:
-        task_sessions = [
-            s for s in task_sessions
-            if (get_date(s.get("started_at") or s.get("first_ts")) or "") <= args.until
-        ]
-        interactive_sessions = [
-            s for s in interactive_sessions
-            if (get_date(s.get("first_ts")) or "") <= args.until
-        ]
+    t0 = time.time()
+    processed, skipped, removed = update_cost_index(db, force=args.reindex)
+    elapsed = time.time() - t0
+    if processed > 0 or removed > 0:
+        print(f"Indexed {processed} files in {elapsed:.1f}s "
+              f"({skipped} unchanged, {removed} removed)", file=sys.stderr)
+
+    # Collect data (using db for cached tokens)
+    task_sessions = collect_task_sessions(db)
+    interactive_sessions = collect_interactive_sessions(db)
+
+    # Apply --since/--until filters using per-message date filtering
+    if args.since or args.until:
+        task_sessions = filter_sessions_by_date(
+            task_sessions, db, since=args.since, until=args.until, is_task=True)
+        interactive_sessions = filter_sessions_by_date(
+            interactive_sessions, db, since=args.since, until=args.until, is_task=False)
 
     # Compute multipliers from sessions with official costs
     multipliers = compute_multipliers(task_sessions)
@@ -1064,7 +1514,8 @@ def main():
         if args.by_model:
             output["by_model"] = report_by_model(task_sessions, interactive_sessions, multipliers, as_json=True)
         if args.by_date:
-            output["by_date"] = report_by_date(task_sessions, interactive_sessions, multipliers, as_json=True)
+            output["by_date"] = report_by_date(task_sessions, interactive_sessions, multipliers,
+                                                db=db, since=args.since, until=args.until, as_json=True)
         if args.interactive:
             output["interactive"] = report_interactive(interactive_sessions, multipliers, as_json=True)
         if args.validate:
@@ -1073,6 +1524,7 @@ def main():
             output["detail"] = report_detail(task_sessions, interactive_sessions, multipliers, task_filter=args.task, as_json=True)
         output["multipliers"] = {k: round(v, 4) for k, v in multipliers.items()}
         print(json.dumps(output, indent=2))
+        db.close()
         return
 
     # Text reports
@@ -1083,13 +1535,16 @@ def main():
     if args.by_model:
         report_by_model(task_sessions, interactive_sessions, multipliers)
     if args.by_date:
-        report_by_date(task_sessions, interactive_sessions, multipliers)
+        report_by_date(task_sessions, interactive_sessions, multipliers,
+                       db=db, since=args.since, until=args.until)
     if args.interactive:
         report_interactive(interactive_sessions, multipliers)
     if args.detail:
         report_detail(task_sessions, interactive_sessions, multipliers, task_filter=args.task)
     if args.validate:
         report_validate(task_sessions)
+
+    db.close()
 
 
 if __name__ == "__main__":
