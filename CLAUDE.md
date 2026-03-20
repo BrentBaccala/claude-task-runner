@@ -127,19 +127,18 @@ prompt to stdout. Capture the prompt text. Note the `model=` on stderr.
 Use the Agent tool with:
 - `prompt`: the full text output from --prepare
 - `model`: the model from stderr (opus, sonnet, or haiku)
-- `run_in_background`: true if you want to tail it or do other work
+- `run_in_background`: **true** (always — tasks run in background by default)
 - `description`: a short summary of the task
 
 ### Step 3: Record the Agent ID
-Immediately after the Agent tool returns (or launches in background),
-extract the `agentId:` from the result and record it:
+Immediately after the Agent tool launches, extract the `agentId:` from
+the result and record it:
 ```bash
 python3 ~/claude-task-runner/task_runner.py --set-agent-id NAME AGENT_ID
 ```
 This is **required** — it enables both `--tail` and `--chat`.
-
-For background agents, do this immediately after launch (before the
-agent finishes) so `--tail` works while it's running.
+Do this immediately after launch (before the agent finishes) so
+`--tail` works while it's running.
 
 ### Step 4: Complete
 After the agent finishes, pipe its full output to `--complete`:
