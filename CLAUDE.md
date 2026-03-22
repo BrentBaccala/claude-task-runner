@@ -499,8 +499,27 @@ modified since.
   Agent tool call; the task runner handles everything else.
 - **Auto-commit**: On success, `--complete` commits changes across all git
   repos under `~/`, excluding infrastructure files and build artifacts.
-- **Backward compatibility**: Old stream-json logs from `claude --print` runs
-  are still viewable with `--show` and `--log`. New runs store plain text.
+- **Run data storage**: Each run's output is stored redundantly across
+  multiple locations for different purposes:
+
+  *Old architecture* (`claude --print`, runs without `agent_id`):
+  - `logs/{name}-{run_id}.log` — stream-json log (authoritative per-run record)
+  - `runs.agent_output` — formatted text extracted from the log
+  - Session `.jsonl` in `sessions/` — the parent `claude --print` session
+    (shared across multiple runs in the same session, not per-run)
+
+  *New architecture* (Agent tool, runs with `agent_id`):
+  - Subagent `.jsonl` — the authoritative per-run record (full tool calls,
+    results, usage). Hardlinked to `sessions/subagents/{sessionId}/` by
+    `--complete` for backup. Claude Code may garbage-collect the original.
+  - `logs/{name}-{run_id}.txt` — extracted assistant text (redundant copy)
+  - `runs.agent_output` — same extracted text in the database (redundant copy)
+
+  The redundancy exists because old runs only have stream-json logs (no
+  subagent jsonl), so `logs/` and `agent_output` can't be removed without
+  losing the ability to view historical runs. `--show` prefers the subagent
+  log when available (richer data), falls back to `log_path` for old runs.
+
 - **Subagent logs**: Claude Code writes subagent logs incrementally (in
   real-time) to `~/.claude/projects/{project}/{sessionId}/subagents/agent-{agentId}.jsonl`.
   The format is the same jsonl as regular session files (user/assistant
