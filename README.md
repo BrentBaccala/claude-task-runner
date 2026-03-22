@@ -78,11 +78,10 @@ task_runner.py --show my-task -v  # with tool calls
 
 | Flag | Shows |
 |------|-------|
-| (default) | Agent's final result text |
-| `-v` | Full agent text from subagent log |
-| `-vv` | + tool invocations (which tools were called) |
-| `-vvv` | + tool output (results from each tool) |
-| `-vvvv` | + full tool input content (Write bodies, Edit strings) |
+| (default) | Assistant text only |
+| `-v` | + tool invocations (which tools were called) |
+| `-vv` | + tool output (results from each tool) |
+| `-vvv` | + full tool input content (Write bodies, Edit strings) |
 
 ## Files
 
@@ -120,8 +119,8 @@ task_runner.py --history                # Tasks by last run time, with cost
 task_runner.py --summary                # Aggregate stats by agent type
 task_runner.py --pending                # Tasks that would run on --run-ready
 task_runner.py --show NAME              # Task output (all run headers, last run detail)
-task_runner.py --show NAME -v           # Include tool calls
-task_runner.py --show NAME -vv          # Include tool output
+task_runner.py --show NAME -v           # + tool call summaries
+task_runner.py --show NAME -vv          # + tool output
 task_runner.py --show NAME --all        # Full detail for every run
 
 # Cost and analytics
