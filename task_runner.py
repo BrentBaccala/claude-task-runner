@@ -1845,7 +1845,12 @@ def complete_task(db, name, agent_output, agent_id=None):
     markers = re.findall(r'TASK_RESULT:[ \t]*(SUCCESS|FAILURE)[ \t]*(.*)', agent_output)
     if markers:
         result_status = markers[-1][0].lower()
-        result_value = markers[-1][1].strip() or None
+        # Trim result_value: stop at quotes, braces, or excessive length
+        # (guards against JSON blobs leaking in from jsonl output)
+        raw_value = markers[-1][1].strip()
+        if raw_value and (raw_value[0] in '"{[' or len(raw_value) > 100):
+            raw_value = None
+        result_value = raw_value or None
     else:
         result_status = "failure"
         print(f"Warning: no TASK_RESULT marker found in output — defaulting to failure")
