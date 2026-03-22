@@ -2003,7 +2003,25 @@ def main():
         if args.output_file:
             if os.path.exists(args.output_file):
                 with open(args.output_file) as f:
-                    agent_output = f.read()
+                    raw = f.read()
+                # If the file looks like jsonl, extract assistant text
+                if raw.lstrip().startswith('{'):
+                    texts = []
+                    for line in raw.split('\n'):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            ev = json.loads(line)
+                            if isinstance(ev, dict) and ev.get("type") == "assistant":
+                                for block in ev.get("message", {}).get("content", []):
+                                    if isinstance(block, dict) and block.get("type") == "text":
+                                        texts.append(block.get("text", ""))
+                        except json.JSONDecodeError:
+                            pass
+                    agent_output = "\n".join(texts) if texts else raw
+                else:
+                    agent_output = raw
             else:
                 print(f"Error: output file not found: {args.output_file}", file=sys.stderr)
                 sys.exit(1)
