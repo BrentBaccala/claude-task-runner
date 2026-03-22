@@ -1968,7 +1968,7 @@ def main():
     parser.add_argument("--hold-on-create", action="store_true", help="Create task with status='hold' instead of 'pending'")
     parser.add_argument("--commit", metavar="NAME", help="Commit specific files as artifacts of a task")
     parser.add_argument("files", nargs="*", help="Files to commit (used with --commit)")
-    parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase output verbosity (-v: full log, -vv: +tool calls, -vvv: +tool output, -vvvv: +file content)")
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase output verbosity (-v: +tool calls, -vv: +tool output, -vvv: +file content)")
     parser.add_argument("-t", "--timestamps", action="store_true", help="Prefix log lines with timestamps")
     parser.add_argument("--all", action="store_true", help="Show all runs in --show (default: latest only)")
     args = parser.parse_args()
