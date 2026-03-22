@@ -85,7 +85,6 @@ task_runner.py --backup                 # Export sessions, commit, push to backu
 # Creating (write prompt to prompts/NAME first)
 task_runner.py --create NAME --agent TYPE
 task_runner.py --create NAME --agent TYPE --depends dep1,dep2
-task_runner.py --create NAME --agent TYPE --hold-on-create
 task_runner.py --create NAME --agent TYPE --priority 20   # higher runs first (default: 10)
 
 # Updating task settings (--set ONLY accepts these options)
@@ -191,10 +190,6 @@ task_runner.py --create my-task --agent tester \
 # With dependencies (won't run until deps complete)
 task_runner.py --create run-tests --agent tester \
   --depends build-project
-
-# Created on hold (won't run until explicitly unheld or activated by another task)
-task_runner.py --create fix-bugs --agent coder \
-  --hold-on-create
 ```
 
 For iterative test/fix chains, create two tasks:
@@ -557,7 +552,7 @@ PreToolUse hook to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'BLOCKED: Do not use plan mode. Instead, write the plan to prompts/NAME and run: python3 task_runner.py --create NAME --agent TYPE --hold-on-create' >&2; exit 2"
+            "command": "echo 'BLOCKED: Do not use plan mode. Instead, write the plan to prompts/NAME and run: python3 task_runner.py --create NAME --agent TYPE' >&2; exit 2"
           }
         ]
       }
@@ -570,8 +565,10 @@ When this hook is active, do NOT use `EnterPlanMode`. Instead, when a task
 needs planning:
 
 1. Write the plan to `prompts/NAME` (no extension)
-2. Create the task: `task_runner.py --create NAME --agent TYPE --hold-on-create`
+2. Create the task: `task_runner.py --create NAME --agent TYPE`
 3. Show the user the plan for review
+
+(Use `--hold-on-create` here only if the user wants to review before running.)
 
 This puts plans into the task runner where they can be reviewed, edited, and
 run on demand — rather than immediately clearing context and implementing.

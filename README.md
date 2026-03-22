@@ -149,7 +149,6 @@ task_runner.py --backup                 # Export sessions, commit, push
 # Creating
 task_runner.py --create NAME --agent TYPE
 task_runner.py --create NAME --agent TYPE --depends dep1,dep2
-task_runner.py --create NAME --agent TYPE --hold-on-create
 task_runner.py --create NAME --agent TYPE --priority 20
 ```
 
@@ -212,7 +211,7 @@ Or add the hook manually to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'BLOCKED: Do not use plan mode. Instead, write the plan to prompts/NAME and run: python3 task_runner.py --create NAME --agent TYPE --hold-on-create' >&2; exit 2"
+            "command": "echo 'BLOCKED: Do not use plan mode. Instead, write the plan to prompts/NAME and run: python3 task_runner.py --create NAME --agent TYPE' >&2; exit 2"
           }
         ]
       }
