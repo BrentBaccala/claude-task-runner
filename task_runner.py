@@ -922,7 +922,7 @@ def unhold_task(db, name):
     return True
 
 
-def show_task(db, name, verbosity=0, all_runs=False):
+def show_task(db, name, verbosity=0, all_runs=False, timestamps=False):
     """Show task details, prompt, and run output."""
     task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
     if task is None:
@@ -1023,18 +1023,18 @@ def show_task(db, name, verbosity=0, all_runs=False):
                 if r["agent_output"]:
                     print(r["agent_output"])
                 else:
-                    print(format_log(subagent_log, verbosity=0))
+                    print(format_log(subagent_log, verbosity=0, timestamps=timestamps))
             else:
                 # verbosity 1+ shows subagent log, shifted down by 1:
                 # v=1 → format verbosity 0 (text only)
                 # v=2 → format verbosity 1 (+ tool calls)
                 # v=3 → format verbosity 2 (+ tool output)
                 # v=4 → format verbosity 3 (+ full content)
-                print(format_log(subagent_log, verbosity=verbosity - 1))
+                print(format_log(subagent_log, verbosity=verbosity - 1, timestamps=timestamps))
         else:
             log_path = r["log_path"]
             if log_path and os.path.exists(log_path):
-                print(format_log(log_path, verbosity=verbosity))
+                print(format_log(log_path, verbosity=verbosity, timestamps=timestamps))
             elif r["agent_output"]:
                 print(r["agent_output"])
 
@@ -1148,7 +1148,19 @@ def show_task(db, name, verbosity=0, all_runs=False):
         show_chat_continuation(r)
 
 
-def format_stream_line(line, verbosity=0):
+def _format_ts(ts):
+    """Convert an ISO timestamp to local time [YYYY-MM-DD HH:MM:SS] format."""
+    if not ts:
+        return ""
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        local_dt = dt.astimezone()
+        return f"[{local_dt.strftime('%Y-%m-%d %H:%M:%S')}] "
+    except (ValueError, TypeError):
+        return ""
+
+
+def format_stream_line(line, verbosity=0, timestamps=False):
     """Format a single stream-json line into readable text.
 
     verbosity=0: agent text and result summary only
@@ -1165,6 +1177,7 @@ def format_stream_line(line, verbosity=0):
         return line
 
     etype = event.get("type", "")
+    ts_prefix = _format_ts(event.get("timestamp")) if timestamps else ""
 
     if etype == "assistant":
         msg = event.get("message", {})
@@ -1222,7 +1235,7 @@ def format_stream_line(line, verbosity=0):
                         parts.append("\n".join(param_lines))
                 else:
                     parts.append(f"[{tool}]")
-        return "\n".join(parts) if parts else None
+        return ts_prefix + "\n".join(parts) if parts else None
 
     elif etype == "user":
         if verbosity < 2:
@@ -1254,7 +1267,7 @@ def format_stream_line(line, verbosity=0):
                             parts.append("\n".join(lines[-10:]))
                         else:
                             parts.append(content.strip())
-        return "\n".join(parts) if parts else None
+        return ts_prefix + "\n".join(parts) if parts else None
 
     elif etype == "result":
         cost = event.get("total_cost_usd", event.get("cost_usd", 0))
@@ -1265,7 +1278,7 @@ def format_stream_line(line, verbosity=0):
         # is an exact duplicate of the last assistant message's text. If we
         # display it, every run's output ends with the same text repeated twice.
         # We only extract the metadata (cost, turns, duration) here.
-        return f"\n--- Result: {subtype} (turns={turns}, cost=${cost:.4f}, {duration/1000:.1f}s) ---"
+        return f"\n{ts_prefix}--- Result: {subtype} (turns={turns}, cost=${cost:.4f}, {duration/1000:.1f}s) ---"
 
     return None
 
@@ -1426,7 +1439,7 @@ def print_log_analysis(log_path):
         print()
 
 
-def format_log(log_path, verbosity=0):
+def format_log(log_path, verbosity=0, timestamps=False):
     """Format an entire stream-json log file into readable text."""
     lines = []
     init_count = 0
@@ -1446,7 +1459,7 @@ def format_log(log_path, verbosity=0):
                             continue
                 except (json.JSONDecodeError, KeyError):
                     pass
-            formatted = format_stream_line(line, verbosity=verbosity)
+            formatted = format_stream_line(line, verbosity=verbosity, timestamps=timestamps)
             if formatted:
                 lines.append(formatted)
     return "\n".join(lines)
@@ -1454,7 +1467,7 @@ def format_log(log_path, verbosity=0):
 
 
 
-def log_task(db, name, verbosity=0):
+def log_task(db, name, verbosity=0, timestamps=False):
     """Show the formatted log of the most recent run."""
     task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
     if task is None:
@@ -1471,7 +1484,7 @@ def log_task(db, name, verbosity=0):
     print(f"Task: {name} (id={task['id']})")
     print(f"Status: {task['status']}")
     print(f"Log: {log_path}\n")
-    print(format_log(log_path, verbosity=verbosity))
+    print(format_log(log_path, verbosity=verbosity, timestamps=timestamps))
 
 
 def set_agent_id(db, name, agent_id):
@@ -1518,7 +1531,7 @@ def find_subagent_log(agent_id):
     return matches[0] if matches else None
 
 
-def tail_task(db, name, verbosity=0):
+def tail_task(db, name, verbosity=0, timestamps=False):
     """Tail the live log of a running task's subagent.
 
     Watches the subagent's jsonl file at:
@@ -1557,7 +1570,7 @@ def tail_task(db, name, verbosity=0):
         with open(log_path) as f:
             # Print existing content
             for line in f:
-                formatted = format_stream_line(line, verbosity=verbosity)
+                formatted = format_stream_line(line, verbosity=verbosity, timestamps=timestamps)
                 if formatted:
                     print(formatted, flush=True)
 
@@ -1565,7 +1578,7 @@ def tail_task(db, name, verbosity=0):
             while True:
                 line = f.readline()
                 if line:
-                    formatted = format_stream_line(line, verbosity=verbosity)
+                    formatted = format_stream_line(line, verbosity=verbosity, timestamps=timestamps)
                     if formatted:
                         print(formatted, flush=True)
                 else:
@@ -1970,6 +1983,7 @@ def main():
     parser.add_argument("--commit", metavar="NAME", help="Commit specific files as artifacts of a task")
     parser.add_argument("files", nargs="*", help="Files to commit (used with --commit)")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase output verbosity (-v: full log, -vv: +tool calls, -vvv: +tool output, -vvvv: +file content)")
+    parser.add_argument("-t", "--timestamps", action="store_true", help="Prefix log lines with timestamps")
     parser.add_argument("--all", action="store_true", help="Show all runs in --show (default: latest only)")
     args = parser.parse_args()
 
@@ -2157,15 +2171,15 @@ def main():
     elif args.show:
         name = resolve_task_name(db, args.show)
         if name:
-            show_task(db, name, verbosity=args.verbose, all_runs=args.all)
+            show_task(db, name, verbosity=args.verbose, all_runs=args.all, timestamps=args.timestamps)
     elif args.log:
         name = resolve_task_name(db, args.log)
         if name:
-            log_task(db, name, verbosity=args.verbose)
+            log_task(db, name, verbosity=args.verbose, timestamps=args.timestamps)
     elif args.tail:
         name = resolve_task_name(db, args.tail)
         if name:
-            tail_task(db, name, verbosity=args.verbose)
+            tail_task(db, name, verbosity=args.verbose, timestamps=args.timestamps)
     elif args.set_agent_id:
         name = resolve_task_name(db, args.set_agent_id[0])
         if name:
