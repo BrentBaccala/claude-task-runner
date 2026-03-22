@@ -12,14 +12,19 @@ import os
 import sys
 
 
+def _is_valid_db(path):
+    """Check that a tasks.db file is non-empty (not a stray from a bad init)."""
+    return os.path.exists(path) and os.path.getsize(path) > 0
+
+
 def find_project_dir():
     env = os.environ.get("TASK_RUNNER_PROJECT")
     if env:
         return os.path.expanduser(env)
     cwd = os.getcwd()
-    if os.path.exists(os.path.join(cwd, "tasks.db")):
+    if _is_valid_db(os.path.join(cwd, "tasks.db")):
         return cwd
-    matches = glob.glob(os.path.expanduser("~/*/tasks.db"))
+    matches = [m for m in glob.glob(os.path.expanduser("~/*/tasks.db")) if _is_valid_db(m)]
     if len(matches) == 1:
         return os.path.dirname(matches[0])
     if len(matches) > 1:
