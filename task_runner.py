@@ -1998,37 +1998,45 @@ def main():
         name = resolve_task_name(db, args.complete)
         if name is None:
             sys.exit(1)
-        # Read agent output from --output-file or stdin
+        # Get agent output: auto-read from subagent log, or from --output-file/stdin
         agent_output = None
-        if args.output_file:
-            if os.path.exists(args.output_file):
-                with open(args.output_file) as f:
-                    raw = f.read()
-                # If the file looks like jsonl, extract assistant text
-                if raw.lstrip().startswith('{'):
-                    texts = []
-                    for line in raw.split('\n'):
-                        line = line.strip()
-                        if not line:
-                            continue
+        # Try subagent log first (cleanest source — always jsonl)
+        effective_id = args.agent_id
+        if not effective_id:
+            run = db.execute(
+                "SELECT agent_id FROM runs WHERE task_id = (SELECT id FROM tasks WHERE name = ?) ORDER BY id DESC LIMIT 1",
+                (name,),
+            ).fetchone()
+            if run:
+                effective_id = run["agent_id"]
+        if effective_id:
+            subagent_log = find_subagent_log(effective_id)
+            if subagent_log:
+                texts = []
+                with open(subagent_log, errors='replace') as f:
+                    for line in f:
                         try:
-                            ev = json.loads(line)
+                            ev = json.loads(line.strip())
                             if isinstance(ev, dict) and ev.get("type") == "assistant":
                                 for block in ev.get("message", {}).get("content", []):
                                     if isinstance(block, dict) and block.get("type") == "text":
                                         texts.append(block.get("text", ""))
                         except json.JSONDecodeError:
                             pass
-                    agent_output = "\n".join(texts) if texts else raw
-                else:
-                    agent_output = raw
+                if texts:
+                    agent_output = "\n".join(texts)
+        # Fallback: --output-file or stdin
+        if not agent_output and args.output_file:
+            if os.path.exists(args.output_file):
+                with open(args.output_file) as f:
+                    agent_output = f.read()
             else:
                 print(f"Error: output file not found: {args.output_file}", file=sys.stderr)
                 sys.exit(1)
-        elif not sys.stdin.isatty():
+        if not agent_output and not sys.stdin.isatty():
             agent_output = sys.stdin.read()
         if not agent_output:
-            print("Error: --complete requires agent output (pipe via stdin or use --output-file)")
+            print("Error: --complete requires agent output (from subagent log, --output-file, or stdin)")
             sys.exit(1)
         if not complete_task(db, name, agent_output, agent_id=args.agent_id):
             sys.exit(1)

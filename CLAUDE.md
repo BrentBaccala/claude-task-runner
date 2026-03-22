@@ -142,16 +142,12 @@ Do this immediately after launch (before the agent finishes) so
 `--tail` works while it's running.
 
 ### Step 4: Complete
-After the agent finishes, pipe its full output to `--complete`:
+After the agent finishes, call `--complete`:
 ```bash
-python3 ~/claude-task-runner/task_runner.py --complete NAME \
-  --agent-id AGENT_ID <<'AGENT_OUTPUT'
-<paste the agent's full result text here>
-AGENT_OUTPUT
+python3 ~/claude-task-runner/task_runner.py --complete NAME
 ```
-The `--agent-id` flag is **required**. If you already called
-`--set-agent-id` in step 3, `--complete` will use the stored value,
-but always pass `--agent-id` anyway as a safety net.
+`--complete` auto-reads the agent's output from its subagent log
+(using the agent ID recorded in step 3). No need to pipe output.
 
 `--complete` parses the output for `TASK_RESULT: SUCCESS/FAILURE`,
 updates the database, auto-commits on success, and handles iterative
