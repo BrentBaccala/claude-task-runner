@@ -1002,35 +1002,21 @@ def show_task(db, name, verbosity=0, all_runs=False, timestamps=False):
     def show_run_detail(r):
         """Show log, committed files, and analysis for a run.
 
-        Verbosity levels for runs with a subagent log:
-          0: agent's final result text (from --complete / agent_output)
-          1: full agent text from subagent log (no tool calls)
-          2: + tool invocations (which tools were called)
-          3: + tool output (results from each tool)
-          4: + full tool input content (Write bodies, Edit strings)
+        Verbosity levels (consistent for both subagent and old stream-json logs):
+          0: assistant text only
+          1: + tool invocations (which tools were called)
+          2: + tool output (results from each tool)
+          3: + full tool input content (Write bodies, Edit strings)
 
-        While running (no agent_output yet), level 0 falls back to level 1.
-        For old stream-json runs (no agent_id), verbosity is passed through
-        to format_log unchanged.
+        For runs with a subagent log, we use that instead of agent_output
+        (which is the Agent tool's raw return blob and can be very large).
         """
         subagent_log = None
         if r["agent_id"]:
             subagent_log = find_subagent_log(r["agent_id"])
 
         if subagent_log:
-            if verbosity == 0:
-                # Show the result summary; fall back to subagent log if no output yet
-                if r["agent_output"]:
-                    print(r["agent_output"])
-                else:
-                    print(format_log(subagent_log, verbosity=0, timestamps=timestamps))
-            else:
-                # verbosity 1+ shows subagent log, shifted down by 1:
-                # v=1 → format verbosity 0 (text only)
-                # v=2 → format verbosity 1 (+ tool calls)
-                # v=3 → format verbosity 2 (+ tool output)
-                # v=4 → format verbosity 3 (+ full content)
-                print(format_log(subagent_log, verbosity=verbosity - 1, timestamps=timestamps))
+            print(format_log(subagent_log, verbosity=verbosity, timestamps=timestamps))
         else:
             log_path = r["log_path"]
             if log_path and os.path.exists(log_path):
