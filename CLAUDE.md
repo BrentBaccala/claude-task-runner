@@ -118,7 +118,7 @@ When the user asks you to run a task, follow these steps exactly:
 
 ### Step 1: Prepare
 ```bash
-python3 ~/claude-task-runner/task_runner.py --prepare NAME
+task_runner.py --prepare NAME
 ```
 This marks the task as running, creates a run record, and outputs the
 prompt to stdout. Capture the prompt text. Note the `model=` on stderr.
@@ -134,7 +134,7 @@ Use the Agent tool with:
 Immediately after the Agent tool launches, extract the `agentId:` from
 the result and record it:
 ```bash
-python3 ~/claude-task-runner/task_runner.py --set-agent-id NAME AGENT_ID
+task_runner.py --set-agent-id NAME AGENT_ID
 ```
 This is **required** — it enables both `--tail` and `--chat`.
 Do this immediately after launch (before the agent finishes) so
@@ -143,7 +143,7 @@ Do this immediately after launch (before the agent finishes) so
 ### Step 4: Complete
 After the agent finishes, call `--complete`:
 ```bash
-python3 ~/claude-task-runner/task_runner.py --complete NAME
+task_runner.py --complete NAME
 ```
 `--complete` auto-reads the agent's output from its subagent log
 (using the agent ID recorded in step 3). No need to pipe output.
@@ -155,7 +155,7 @@ chains (on_partial_failure, rerun_after).
 ### Optional: Tail a Background Agent
 If the agent was launched with `run_in_background: true`:
 ```bash
-python3 ~/claude-task-runner/task_runner.py --tail NAME -v
+task_runner.py --tail NAME -v
 ```
 This shows the agent's live output. Requires step 3 to have been done.
 Run this from the Bash tool (it blocks until Ctrl+C or timeout).

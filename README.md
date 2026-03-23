@@ -211,7 +211,7 @@ Or add the hook manually to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'BLOCKED: Do not use plan mode. Instead, write the plan to prompts/NAME and run: python3 task_runner.py --create NAME --agent TYPE' >&2; exit 2"
+            "command": "echo 'BLOCKED: Do not use plan mode. Instead, write the plan to prompts/NAME and run: task_runner.py --create NAME --agent TYPE' >&2; exit 2"
           }
         ]
       }
