@@ -2363,23 +2363,31 @@ def main():
             if not run:
                 print(f"Error: task '{name}' has no runs yet")
                 sys.exit(1)
-            # Find the session file
+            # Find session files to scan (chat session, subagent log, old session)
+            paths_to_scan = []
+            if run["chat_session_id"]:
+                p = os.path.expanduser(f"~/.claude/projects/-home-claude/{run['chat_session_id']}.jsonl")
+                if os.path.exists(p):
+                    paths_to_scan.append(p)
+            if run["agent_id"]:
+                p = find_subagent_log(run["agent_id"])
+                if p:
+                    paths_to_scan.append(p)
             session_id = run["session_id"]
-            if not session_id:
-                session_id = extract_session_id(run["log_path"]) if run["log_path"] else None
-            if not session_id:
-                print(f"Error: could not find session ID for task '{name}'")
+            if not session_id and run["log_path"]:
+                session_id = extract_session_id(run["log_path"])
+            if session_id:
+                p = os.path.expanduser(f"~/.claude/projects/-home-claude/{session_id}.jsonl")
+                if os.path.exists(p):
+                    paths_to_scan.append(p)
+            if not paths_to_scan:
+                print(f"Error: no session or subagent files found for task '{name}'")
                 sys.exit(1)
-            session_path = os.path.expanduser(
-                f"~/.claude/projects/-home-claude/{session_id}.jsonl"
-            )
-            if not os.path.exists(session_path):
-                print(f"Error: session file not found: {session_path}")
-                sys.exit(1)
-            # Scan the full session file for TASK_RESULT markers in assistant messages
+            # Scan all files for the last TASK_RESULT marker
             result_status = None
             result_value = None
-            with open(session_path, errors='replace') as f:
+            for session_path in paths_to_scan:
+              with open(session_path, errors='replace') as f:
                 for line in f:
                     try:
                         ev = json.loads(line.strip())
@@ -2394,8 +2402,15 @@ def main():
                                 block.get("text", "")
                             )
                             if markers:
+                                raw = markers[-1][1].strip()
+                                # Skip prompt instructions (e.g., "SUCCESS if the site...")
+                                if raw.startswith("if "):
+                                    continue
+                                # Guard against JSON blobs
+                                if raw and (raw[0] in '"{[' or len(raw) > 100):
+                                    raw = None
                                 result_status = markers[-1][0].lower()
-                                result_value = markers[-1][1].strip() or None
+                                result_value = raw or None
             if not result_status:
                 print(f"No TASK_RESULT found in session for task '{name}'")
                 sys.exit(1)
