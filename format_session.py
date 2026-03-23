@@ -184,6 +184,18 @@ def process_events(events, width, show_thinking=False, show_system=False,
         if etype == "user":
             msg = event.get("message", {})
             content = msg.get("content", "")
+            # Skip task-notification system messages injected as user events
+            content_str = content if isinstance(content, str) else ""
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, str):
+                        content_str = item
+                        break
+                    elif isinstance(item, dict) and item.get("type") == "text":
+                        content_str = item.get("text", "")
+                        break
+            if "<task-notification>" in content_str:
+                continue
             if not show_compaction and is_compaction_summary(content):
                 merged.append(("compaction_marker", None, ts))
             else:
