@@ -1048,43 +1048,68 @@ def show_task(db, name, verbosity=0, all_runs=False, timestamps=False):
 
     def show_chat_continuation(r):
         """Show interactive --chat events that occurred after the task runner run."""
-        session_id = r["session_id"]
-        if not session_id:
-            session_id = extract_session_id(r["log_path"]) if r["log_path"] else None
-        if not session_id:
-            return
-        session_path = os.path.expanduser(
-            f"~/.claude/projects/-home-claude/{session_id}.jsonl"
-        )
-        if not os.path.exists(session_path):
-            return
-
-        # Find the last timestamp in the task runner log
-        last_log_dt = None
-        if r["log_path"] and os.path.exists(r["log_path"]):
-            with open(r["log_path"]) as f:
-                for line in f:
-                    try:
-                        ev = json.loads(line.strip())
-                        ts = ev.get("timestamp")
-                        if ts:
-                            last_log_dt = datetime.fromisoformat(ts)
-                    except (json.JSONDecodeError, KeyError, ValueError):
-                        pass
-        if not last_log_dt:
-            return
-        # Make timezone-aware if naive (task runner injects local timestamps)
-        if last_log_dt.tzinfo is None:
-            last_log_dt = last_log_dt.astimezone()
 
         def parse_ts(ts):
             """Parse a timestamp string, handling both local and UTC (Z suffix)."""
             try:
-                return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.astimezone()
+                return dt
             except (ValueError, AttributeError):
                 return None
 
-        # Collect events from session file that are after the log's last timestamp
+        # Find the session file and the cutoff timestamp
+        session_path = None
+        last_log_dt = None
+
+        # New architecture: chat_session_id from --chat, cutoff from subagent log
+        if r["chat_session_id"]:
+            p = os.path.expanduser(f"~/.claude/projects/-home-claude/{r['chat_session_id']}.jsonl")
+            if os.path.exists(p):
+                session_path = p
+            # Cutoff: last event in the subagent log
+            if r["agent_id"]:
+                subagent_log = find_subagent_log(r["agent_id"])
+                if subagent_log:
+                    with open(subagent_log, errors='replace') as f:
+                        for line in f:
+                            try:
+                                ev = json.loads(line.strip())
+                                ts = ev.get("timestamp")
+                                if ts:
+                                    dt = parse_ts(ts)
+                                    if dt:
+                                        last_log_dt = dt
+                            except (json.JSONDecodeError, KeyError, ValueError):
+                                pass
+
+        # Old architecture: session_id from run, cutoff from stream-json log
+        if not session_path:
+            session_id = r["session_id"]
+            if not session_id and r["log_path"]:
+                session_id = extract_session_id(r["log_path"])
+            if session_id:
+                p = os.path.expanduser(f"~/.claude/projects/-home-claude/{session_id}.jsonl")
+                if os.path.exists(p):
+                    session_path = p
+            if r["log_path"] and os.path.exists(r["log_path"]):
+                with open(r["log_path"]) as f:
+                    for line in f:
+                        try:
+                            ev = json.loads(line.strip())
+                            ts = ev.get("timestamp")
+                            if ts:
+                                dt = parse_ts(ts)
+                                if dt:
+                                    last_log_dt = dt
+                        except (json.JSONDecodeError, KeyError, ValueError):
+                            pass
+
+        if not session_path or not last_log_dt:
+            return
+
+        # Collect events from session file that are after the cutoff
         chat_events = []
         with open(session_path, errors='replace') as f:
             for line in f:
