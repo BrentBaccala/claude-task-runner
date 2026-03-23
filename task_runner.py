@@ -2048,10 +2048,15 @@ def main():
             sys.exit(1)
         if not complete_task(db, name, agent_output, agent_id=args.agent_id):
             sys.exit(1)
-        if not args.agent_id:
-            print(f"\nWarning: no --agent-id provided. Output was recorded but --chat won't work.")
+        # Check if agent_id was recorded (either via --agent-id or --set-agent-id)
+        run = db.execute(
+            "SELECT agent_id FROM runs WHERE task_id = (SELECT id FROM tasks WHERE name = ?) ORDER BY id DESC LIMIT 1",
+            (name,),
+        ).fetchone()
+        if run and not run["agent_id"]:
+            print(f"\nWarning: no agent_id recorded. --chat and --tail won't work for this run.")
             print(f"Fix with: task_runner.py --set-agent-id {name} AGENT_ID")
-            sys.exit(1)
+            print(f"  or:     task_runner.py --find-agents")
     elif args.pending:
         running = db.execute(
             "SELECT t.*, r.pid FROM tasks t LEFT JOIN runs r ON t.id = r.task_id AND r.finished_at IS NULL "
