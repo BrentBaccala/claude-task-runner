@@ -2224,43 +2224,62 @@ def main():
             "SELECT r.id, r.started_at, t.name FROM runs r "
             "JOIN tasks t ON r.task_id = t.id "
             "WHERE r.agent_id IS NULL AND r.started_at > '2026-03-19' "
-            "ORDER BY r.id"
+            "ORDER BY r.id DESC"
         ).fetchall()
         if not runs_missing:
             print("No runs with missing agent_id found.")
             sys.exit(0)
 
-        # Build index of subagent logs: task_name -> [(agent_id, path)]
-        subagent_index = {}
+        # Build index of subagent logs: [(agent_id, path, task_name_or_None, first_user_msg)]
+        subagent_logs = []
         patterns = [
             os.path.expanduser("~/.claude/projects/*/subagents/agent-*.jsonl"),
             os.path.expanduser("~/.claude/projects/*/*/subagents/agent-*.jsonl"),
         ]
-        all_logs = []
+        all_log_paths = []
         for pat in patterns:
-            all_logs.extend(_glob.glob(pat))
-        for path in all_logs:
+            all_log_paths.extend(_glob.glob(pat))
+        for path in all_log_paths:
             try:
                 with open(path) as f:
                     for line in f:
                         ev = json.loads(line.strip())
                         if ev.get("type") == "user":
                             content = ev.get("message", {}).get("content", "")
-                            if isinstance(content, str) and content.startswith("Task: "):
-                                task_name = content.split("\n")[0].replace("Task: ", "").strip()
+                            if isinstance(content, str):
                                 agent_id = os.path.basename(path).replace("agent-", "").replace(".jsonl", "")
-                                subagent_index.setdefault(task_name, []).append((agent_id, path))
+                                task_name = None
+                                if content.startswith("Task: "):
+                                    task_name = content.split("\n")[0].replace("Task: ", "").strip()
+                                subagent_logs.append((agent_id, path, task_name, content))
                             break
             except (json.JSONDecodeError, OSError):
                 pass
 
+        # Load prompt files for fallback matching
+        prompts_dir = os.path.join(PROJECT_DIR, "prompts")
+
         updated = 0
+        assigned_ids = set()
         for run in runs_missing:
             name = run["name"]
-            candidates = subagent_index.get(name, [])
+            # First try: match by Task: prefix
+            candidates = [(a, p) for a, p, tn, _ in subagent_logs
+                          if tn == name and a not in assigned_ids]
+            # Fallback: match by prompt content in first user message
+            if not candidates:
+                prompt_path = os.path.join(prompts_dir, name)
+                if os.path.exists(prompt_path):
+                    with open(prompt_path) as f:
+                        prompt_start = f.read(200).strip()
+                    if prompt_start:
+                        candidates = [(a, p) for a, p, _, msg in subagent_logs
+                                      if prompt_start[:80] in msg[:500]
+                                      and a not in assigned_ids]
             if len(candidates) == 1:
                 agent_id = candidates[0][0]
                 db.execute("UPDATE runs SET agent_id = ? WHERE id = ?", (agent_id, run["id"]))
+                assigned_ids.add(agent_id)
                 print(f"  Run {run['id']} ({name}): set agent_id = {agent_id}")
                 updated += 1
             elif len(candidates) > 1:
@@ -2285,6 +2304,7 @@ def main():
                         pass
                 if best and best_diff < 300:  # within 5 minutes
                     db.execute("UPDATE runs SET agent_id = ? WHERE id = ?", (best, run["id"]))
+                    assigned_ids.add(best)
                     print(f"  Run {run['id']} ({name}): set agent_id = {best} (matched by time, {best_diff:.0f}s diff)")
                     updated += 1
                 else:
