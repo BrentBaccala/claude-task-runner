@@ -125,7 +125,7 @@ prompt to stdout. Capture the prompt text. Note the `model=` on stderr.
 
 ### Step 2: Launch the Agent
 Use the Agent tool with:
-- `prompt`: the full text output from --prepare
+- `prompt`: the **exact, unmodified** text output from --prepare (do not strip, summarize, or reformat it — pass it through verbatim)
 - `model`: the model from stderr (opus, sonnet, or haiku)
 - `run_in_background`: **true** (always — tasks run in background by default)
 - `description`: a short summary of the task
