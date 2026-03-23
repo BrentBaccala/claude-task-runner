@@ -1769,7 +1769,9 @@ def prepare_task(db, name):
         f"  TASK_RESULT: SUCCESS 184/184\n"
         f"  TASK_RESULT: FAILURE 10/11\n"
         f"This signals whether the task's objective was achieved (e.g., tests passed,\n"
-        f"build succeeded), not just whether you completed your analysis.\n"
+        f"build succeeded), not just whether you completed your analysis.\n\n"
+        f"Do NOT run Bash commands in the background (no run_in_background on Bash).\n"
+        f"Run all commands synchronously so output is captured in your response.\n"
     )
 
     # Record run start with the prompt that will be sent
