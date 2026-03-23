@@ -1756,9 +1756,18 @@ def prepare_task(db, name):
 
     agent_prompt = prompt
 
+    # Record run start with the prompt that will be sent
+    started_at = datetime.now().isoformat()
+    cursor = db.execute(
+        "INSERT INTO runs (task_id, started_at, agent_prompt) VALUES (?, ?, ?)",
+        (task["id"], started_at, agent_prompt),
+    )
+    run_id = cursor.lastrowid
+    db.commit()
+
     # Wrap prompt with standard context for the agent
     full_prompt = (
-        f"Task: {name}\n"
+        f"Task: {name} (run {run_id})\n"
         f"Description: {task['description']}\n\n"
         f"Instructions:\n{prompt}\n\n"
         f"IMPORTANT: As the very last line of your response, write exactly one of:\n"
@@ -1773,15 +1782,6 @@ def prepare_task(db, name):
         f"Do NOT run Bash commands in the background (no run_in_background on Bash).\n"
         f"Run all commands synchronously so output is captured in your response.\n"
     )
-
-    # Record run start with the prompt that will be sent
-    started_at = datetime.now().isoformat()
-    cursor = db.execute(
-        "INSERT INTO runs (task_id, started_at, agent_prompt) VALUES (?, ?, ?)",
-        (task["id"], started_at, agent_prompt),
-    )
-    run_id = cursor.lastrowid
-    db.commit()
 
     # Output metadata to stderr, prompt to stdout
     model = AGENT_MODELS.get(task["agent_type"], "opus")
@@ -2250,7 +2250,9 @@ def main():
                                 agent_id = os.path.basename(path).replace("agent-", "").replace(".jsonl", "")
                                 task_name = None
                                 if content.startswith("Task: "):
-                                    task_name = content.split("\n")[0].replace("Task: ", "").strip()
+                                    # Handle both "Task: name" and "Task: name (run 123)"
+                                    task_line = content.split("\n")[0].replace("Task: ", "").strip()
+                                    task_name = re.sub(r'\s*\(run \d+\)$', '', task_line)
                                 subagent_logs.append((agent_id, path, task_name, content))
                             break
             except (json.JSONDecodeError, OSError):
