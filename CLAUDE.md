@@ -136,9 +136,13 @@ the result and record it:
 ```bash
 task_runner.py --set-agent-id NAME AGENT_ID
 ```
-This is **required** — it enables both `--tail` and `--chat`.
-Do this immediately after launch (before the agent finishes) so
-`--tail` works while it's running.
+This is **required** — it marks the task as `running` and enables
+`--tail` and `--chat`. Do this immediately after launch (before the
+agent finishes) so `--tail` works while it's running.
+
+Note: `--prepare` does NOT mark the task as running — that happens here.
+This means if the user interrupts between prepare and agent launch,
+the task stays pending and can be re-prepared without needing `--kill`.
 
 ### Step 4: Complete
 After the agent finishes, call `--complete`:

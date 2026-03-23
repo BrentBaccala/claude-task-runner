@@ -1491,6 +1491,8 @@ def set_agent_id(db, name, agent_id):
         print(f"Error: no run found for task '{name}'")
         return False
     db.execute("UPDATE runs SET agent_id = ? WHERE id = ?", (agent_id, run["id"]))
+    # Mark the task as running now that an agent is actually executing
+    db.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (task["id"],))
     db.commit()
     print(f"Recorded agent_id {agent_id} for task '{name}' (run {run['id']})")
     return True
@@ -1706,11 +1708,10 @@ def continue_task(db, name, prompt=None):
 def prepare_task(db, name):
     """Prepare a task for execution via the Claude Code Agent tool.
 
-    Marks the task as running, creates a run record, and outputs the prompt
-    to stdout. The caller (an interactive Claude Code session) should:
-    1. Capture this prompt
-    2. Pass it to the Agent tool
-    3. Call --complete with the result
+    Creates a run record and outputs the prompt to stdout. The task status
+    remains unchanged until --set-agent-id is called (which marks it running).
+    This avoids leaving tasks stuck in 'running' if the user interrupts
+    between --prepare and the Agent tool launch.
 
     Outputs to stdout: the full prompt (for the Agent tool)
     Outputs to stderr: metadata (run_id, model)
@@ -1725,12 +1726,16 @@ def prepare_task(db, name):
         print(f"Error: task '{name}' is on hold. Use --unhold first.", file=sys.stderr)
         return False
     if task["status"] == "running":
-        print(f"Error: task '{name}' is already running. Use --kill first.", file=sys.stderr)
-        return False
-
-    # Mark as running
-    db.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (task["id"],))
-    db.commit()
+        # Allow re-prepare if the previous prepare was never followed by --set-agent-id
+        last_run = db.execute(
+            "SELECT agent_id FROM runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (task["id"],),
+        ).fetchone()
+        if last_run and last_run["agent_id"]:
+            print(f"Error: task '{name}' is already running. Use --kill first.", file=sys.stderr)
+            return False
+        # Stale prepare (interrupted before agent launch) — allow re-prepare
+        print(f"Note: re-preparing task '{name}' (previous prepare had no agent launched)", file=sys.stderr)
 
     # Read prompt from file
     prompt_path = os.path.join(PROJECT_DIR, "prompts", name)
