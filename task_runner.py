@@ -1962,6 +1962,7 @@ def main():
     parser.add_argument("--kill", metavar="NAME", help="Mark a running task as interrupted")
     parser.add_argument("--sync", metavar="NAME", help="Update task status from chat continuation results")
     parser.add_argument("--backup", action="store_true", help="Export sessions, commit changes, and push to backup remote")
+    parser.add_argument("--find-agents", action="store_true", help="Scan subagent logs to fill in missing agent_ids")
     parser.add_argument("--continue", metavar="NAME", dest="continue_task",
                         help="Continue an interrupted, timed-out, or max-turns task")
     parser.add_argument("--prompt", metavar="TEXT", dest="continue_prompt",
@@ -2216,6 +2217,83 @@ def main():
         name = resolve_task_name(db, args.kill)
         if name:
             kill_task(db, name)
+    elif args.find_agents:
+        # Scan subagent logs to find and fill in missing agent_ids
+        import glob as _glob
+        runs_missing = db.execute(
+            "SELECT r.id, r.started_at, t.name FROM runs r "
+            "JOIN tasks t ON r.task_id = t.id "
+            "WHERE r.agent_id IS NULL AND r.started_at > '2026-03-19' "
+            "ORDER BY r.id"
+        ).fetchall()
+        if not runs_missing:
+            print("No runs with missing agent_id found.")
+            sys.exit(0)
+
+        # Build index of subagent logs: task_name -> [(agent_id, path)]
+        subagent_index = {}
+        patterns = [
+            os.path.expanduser("~/.claude/projects/*/subagents/agent-*.jsonl"),
+            os.path.expanduser("~/.claude/projects/*/*/subagents/agent-*.jsonl"),
+        ]
+        all_logs = []
+        for pat in patterns:
+            all_logs.extend(_glob.glob(pat))
+        for path in all_logs:
+            try:
+                with open(path) as f:
+                    for line in f:
+                        ev = json.loads(line.strip())
+                        if ev.get("type") == "user":
+                            content = ev.get("message", {}).get("content", "")
+                            if isinstance(content, str) and content.startswith("Task: "):
+                                task_name = content.split("\n")[0].replace("Task: ", "").strip()
+                                agent_id = os.path.basename(path).replace("agent-", "").replace(".jsonl", "")
+                                subagent_index.setdefault(task_name, []).append((agent_id, path))
+                            break
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        updated = 0
+        for run in runs_missing:
+            name = run["name"]
+            candidates = subagent_index.get(name, [])
+            if len(candidates) == 1:
+                agent_id = candidates[0][0]
+                db.execute("UPDATE runs SET agent_id = ? WHERE id = ?", (agent_id, run["id"]))
+                print(f"  Run {run['id']} ({name}): set agent_id = {agent_id}")
+                updated += 1
+            elif len(candidates) > 1:
+                # Match by closest creation time to run started_at
+                run_ts = run["started_at"]
+                best = None
+                best_diff = None
+                for aid, path in candidates:
+                    try:
+                        mtime = os.path.getmtime(path)
+                        file_ts = datetime.fromtimestamp(mtime).isoformat()
+                        diff = abs(len(file_ts) - len(run_ts))  # rough comparison
+                        # Better: compare actual timestamps
+                        from datetime import datetime as _dt
+                        run_dt = _dt.fromisoformat(run_ts)
+                        file_dt = datetime.fromtimestamp(mtime)
+                        diff = abs((run_dt - file_dt).total_seconds())
+                        if best_diff is None or diff < best_diff:
+                            best = aid
+                            best_diff = diff
+                    except (ValueError, OSError):
+                        pass
+                if best and best_diff < 300:  # within 5 minutes
+                    db.execute("UPDATE runs SET agent_id = ? WHERE id = ?", (best, run["id"]))
+                    print(f"  Run {run['id']} ({name}): set agent_id = {best} (matched by time, {best_diff:.0f}s diff)")
+                    updated += 1
+                else:
+                    print(f"  Run {run['id']} ({name}): {len(candidates)} candidates, couldn't match")
+            else:
+                print(f"  Run {run['id']} ({name}): no subagent log found")
+
+        db.commit()
+        print(f"\nUpdated {updated} run(s)")
     elif args.backup:
         # Snapshot .claude file listing for tracking GC deletions
         snapshots_dir = os.path.join(PROJECT_DIR, "claude-snapshots")
