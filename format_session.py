@@ -344,6 +344,7 @@ from project_dir import PROJECT_DIR as _PROJECT_DIR, DB_PATH as TASK_DB
 
 # Derive sessions dir from the project owner's home, not the running user's.
 # This allows other users to view sessions when TASK_RUNNER_PROJECT is set.
+# (export_sessions.py makes these files world-readable on --backup.)
 _project_owner_home = os.path.expanduser(
     "~" + pathlib.Path(_PROJECT_DIR).owner()
 )
