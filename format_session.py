@@ -17,6 +17,7 @@ Claude Code CLI:
 
 import json
 import os
+import pathlib
 import sqlite3
 import sys
 import textwrap
@@ -336,11 +337,17 @@ def render_assistant(content_blocks, width, show_thinking=False, show_tools=Fals
             yield tool_line
 
 
-SESSIONS_DIR = os.path.expanduser("~/.claude/projects/-home-claude")
 _script_dir = os.path.dirname(os.path.realpath(__file__))
 if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
-from project_dir import DB_PATH as TASK_DB
+from project_dir import PROJECT_DIR as _PROJECT_DIR, DB_PATH as TASK_DB
+
+# Derive sessions dir from the project owner's home, not the running user's.
+# This allows other users to view sessions when TASK_RUNNER_PROJECT is set.
+_project_owner_home = os.path.expanduser(
+    "~" + pathlib.Path(_PROJECT_DIR).owner()
+)
+SESSIONS_DIR = os.path.join(_project_owner_home, ".claude", "projects", "-home-claude")
 # Legacy prefix for detecting old task sessions (before DB tracking).
 # New sessions are detected via session_id in the runs table.
 TASK_PROMPT_PREFIX = "You are working on the minimal associated primes computation project."
