@@ -487,9 +487,17 @@ def scan_sessions(db):
 
     Only re-parses files whose mtime has changed. Preserves display_name
     on re-scan. Marks sessions whose files no longer exist as deleted.
+    Silently skips cache updates if the database is read-only.
     """
     if not os.path.isdir(SESSIONS_DIR):
         return
+
+    # Check if database is writable (may be read-only for other users)
+    try:
+        db.execute("CREATE TABLE IF NOT EXISTS _write_test (x INTEGER)")
+        db.execute("DROP TABLE IF EXISTS _write_test")
+    except sqlite3.OperationalError:
+        return  # read-only — skip cache update, use existing data
 
     task_ids = get_task_session_ids()
 
