@@ -179,6 +179,15 @@ def export_subagent_logs(dry_run=False):
 def main():
     dry_run = "--dry-run" in sys.argv or "-n" in sys.argv
 
+    # Make session files world-readable (Claude Code creates them as 600).
+    # This allows other users to view sessions via format_session.py.
+    if not dry_run:
+        import subprocess
+        subprocess.run(
+            ["chmod", "-R", "o+rX", SESSIONS_DIR],
+            capture_output=True,
+        )
+
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
 
