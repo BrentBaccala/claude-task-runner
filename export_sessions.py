@@ -231,11 +231,12 @@ def main():
         if sid in renames:
             is_plan = False
 
-        # Determine display name (priority: existing display_name > /rename > plan title)
-        if not display_name:
-            if sid in renames:
-                display_name = renames[sid]
-            elif is_plan:
+        # Determine display name (priority: /rename > existing display_name > plan title)
+        # /rename is the user's explicit action and always wins
+        if sid in renames:
+            display_name = renames[sid]
+        elif not display_name:
+            if is_plan:
                 display_name = "plan: " + plan_title
             elif custom_title:
                 display_name = custom_title
@@ -243,8 +244,8 @@ def main():
         if not display_name:
             display_name = sid[:12]
 
-        # Update display_name in DB if not already set
-        if not sess["display_name"] and display_name:
+        # Update display_name in DB if changed
+        if display_name and display_name != sess["display_name"]:
             if not dry_run:
                 db.execute("UPDATE sessions SET display_name = ? WHERE session_id = ?",
                            (display_name, sid))
