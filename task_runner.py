@@ -1137,6 +1137,7 @@ def show_task(db, name, verbosity=0, all_runs=False, timestamps=False):
                 chat_events, width,
                 show_tools=show_tools,
                 show_tool_output=show_tool_output,
+                show_timestamps=timestamps,
             ):
                 print(line)
         except ImportError:
