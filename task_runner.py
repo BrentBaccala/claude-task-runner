@@ -710,6 +710,88 @@ def list_history(db):
         print(f"{t['id']:>3}  {t['status']:<12}  {t['agent_type']:<12}  {last_run:<12}  {cost:>8}  {tokens:>9}  {result:<8}  {t['name']}{suffix}")
 
 
+def show_activity(db, limit=20):
+    """Show recent activity across tasks, chat continuations, and interactive sessions."""
+    events = []
+
+    # Task runs (including chat continuations)
+    runs = db.execute("""
+        SELECT r.id as run_id, t.name, t.id as task_id, r.started_at, r.finished_at,
+               r.success, r.result_value, r.cost_usd, r.chat_session_id
+        FROM runs r JOIN tasks t ON r.task_id = t.id
+        WHERE r.started_at IS NOT NULL
+        ORDER BY r.started_at DESC
+    """).fetchall()
+
+    for r in runs:
+        started = r["started_at"]
+        finished = r["finished_at"]
+        status = "OK" if r["success"] else "FAIL"
+        if not finished:
+            status = "RUNNING"
+        result = r["result_value"] or ""
+        cost = f"${r['cost_usd']:.2f}" if r["cost_usd"] else ""
+        name = r["name"]
+        # Use finished_at for sorting (most recent activity), fall back to started_at
+        sort_ts = finished or started
+        events.append((sort_ts, "task", f"{status:<7s} {cost:>7s}  {result:<10s}  {name} (run {r['run_id']})"))
+
+        # Chat continuation: show as separate entry if it exists
+        if r["chat_session_id"]:
+            # Find the last timestamp in the chat session
+            chat_path = os.path.expanduser(
+                f"~/.claude/projects/-home-claude/{r['chat_session_id']}.jsonl"
+            )
+            if os.path.exists(chat_path):
+                last_ts = None
+                try:
+                    with open(chat_path, errors='replace') as f:
+                        for line in f:
+                            try:
+                                ev = json.loads(line.strip())
+                                ts = ev.get("timestamp", "")
+                                if ts:
+                                    last_ts = ts
+                            except json.JSONDecodeError:
+                                pass
+                except OSError:
+                    pass
+                if last_ts:
+                    events.append((last_ts, "chat", f"{'':>7s} {'':>7s}  {'':>10s}  {name} (chat continuation)"))
+
+    # Interactive sessions
+    sessions = db.execute("""
+        SELECT session_id, display_name, first_ts, last_ts, user_msg_count
+        FROM sessions
+        WHERE is_task = 0 AND has_messages = 1 AND deleted = 0
+        ORDER BY last_ts DESC
+    """).fetchall()
+
+    for s in sessions:
+        name = s["display_name"] or s["session_id"][:12]
+        msgs = s["user_msg_count"] or 0
+        sort_ts = s["last_ts"] or s["first_ts"] or ""
+        events.append((sort_ts, "session", f"{'':>7s} {'':>7s}  {msgs:>3d} msgs    {name}"))
+
+    # Sort by timestamp descending and truncate
+    events.sort(key=lambda x: x[0] or "", reverse=True)
+    events = events[:limit]
+
+    # Format timestamps and print
+    print(f"{'When':<14s}  {'Type':<7s}  {'Status':>7s} {'Cost':>7s}  {'Result':<10s}  Description")
+    print("─" * 90)
+    for ts, etype, detail in events:
+        when = ""
+        if ts:
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                local_dt = dt.astimezone()
+                when = local_dt.strftime("%-d %b %H:%M")
+            except (ValueError, TypeError):
+                when = ts[:16]
+        print(f"{when:<14s}  {etype:<7s}  {detail}")
+
+
 def show_status(db):
     """Show detailed status including dependency resolution."""
     tasks = {t["name"]: dict(t) for t in db.execute("SELECT * FROM tasks").fetchall()}
@@ -1969,6 +2051,8 @@ def main():
     parser.add_argument("--list", action="store_true", help="List all tasks")
     parser.add_argument("--summary", action="store_true", help="Show aggregate run statistics")
     parser.add_argument("--history", action="store_true", help="List tasks sorted by last run time")
+    parser.add_argument("--activity", nargs="?", const=20, type=int, metavar="N",
+                        help="Show recent activity across tasks and interactive sessions (default: 20)")
     parser.add_argument("--status", action="store_true", help="Show detailed status")
     parser.add_argument("--prepare", metavar="NAME", help="Prepare a task: mark running, output prompt for Agent tool")
     parser.add_argument("--complete", metavar="NAME", help="Record completion of a task run via Agent tool")
@@ -2020,6 +2104,8 @@ def main():
         show_summary(db)
     elif args.history:
         list_history(db)
+    elif args.activity is not None:
+        show_activity(db, limit=args.activity)
     elif args.status:
         show_status(db)
     elif args.prepare:
