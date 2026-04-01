@@ -1709,8 +1709,23 @@ def chat_task(db, name):
     ).fetchone()
     agent_id = run["agent_id"] if run else None
     if not agent_id:
-        print(f"Error: no agent_id recorded for task '{name}'")
-        print("Use --set-agent-id NAME AGENT_ID after running the Agent tool.")
+        # Fallback for old architecture: extract session_id from stream-json log
+        log_path = run["log_path"] if run else None
+        session_id = run["session_id"] if run else None
+        if not session_id and log_path:
+            session_id = extract_session_id(log_path)
+        if session_id:
+            session_path = os.path.expanduser(
+                f"~/.claude/projects/-home-claude/{session_id}.jsonl"
+            )
+            if os.path.exists(session_path):
+                print(f"Resuming old session {session_id}")
+                os.chdir(os.path.expanduser("~"))
+                os.execvp(CLAUDE_BIN, [CLAUDE_BIN, "--resume", session_id, "--dangerously-skip-permissions"])
+            else:
+                print(f"Error: session file not found: {session_path}")
+                return False
+        print(f"Error: no agent_id or session_id for task '{name}'")
         return False
 
     # If a chat session already exists for this run, resume it
