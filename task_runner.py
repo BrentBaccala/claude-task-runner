@@ -1704,7 +1704,7 @@ def chat_task(db, name):
 
     # Find the most recent run with an agent_id
     run = db.execute(
-        "SELECT id, agent_id, chat_session_id FROM runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+        "SELECT id, agent_id, chat_session_id, session_id, log_path FROM runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
         (task["id"],),
     ).fetchone()
     agent_id = run["agent_id"] if run else None
