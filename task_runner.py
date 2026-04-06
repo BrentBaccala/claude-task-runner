@@ -1312,6 +1312,8 @@ def format_stream_line(line, verbosity=0, timestamps=False):
                     detail = ""
                     if "command" in inp:
                         detail = f" {inp['command']}"
+                    elif "cmd" in inp:
+                        detail = f" {inp['cmd']}"
                     elif "hostAlias" in inp and "localPath" in inp:
                         detail = f" {inp.get('localPath', '?')} -> {inp.get('hostAlias', '?')}:{inp.get('remotePath', '?')}"
                     elif "hostAlias" in inp:
