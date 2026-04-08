@@ -512,6 +512,8 @@ def extract_session_id(log_path):
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(event, dict):
+                continue
             if event.get("type") == "system" and event.get("subtype") == "init":
                 session_id = event.get("session_id")
     return session_id
@@ -749,6 +751,8 @@ def show_activity(db, limit=20):
                         for line in f:
                             try:
                                 ev = json.loads(line.strip())
+                                if not isinstance(ev, dict):
+                                    continue
                                 ts = ev.get("timestamp", "")
                                 if ts:
                                     last_ts = ts
@@ -1158,6 +1162,8 @@ def show_task(db, name, verbosity=0, all_runs=False, timestamps=False):
                         for line in f:
                             try:
                                 ev = json.loads(line.strip())
+                                if not isinstance(ev, dict):
+                                    continue
                                 ts = ev.get("timestamp")
                                 if ts:
                                     dt = parse_ts(ts)
@@ -1180,6 +1186,8 @@ def show_task(db, name, verbosity=0, all_runs=False, timestamps=False):
                     for line in f:
                         try:
                             ev = json.loads(line.strip())
+                            if not isinstance(ev, dict):
+                                continue
                             ts = ev.get("timestamp")
                             if ts:
                                 dt = parse_ts(ts)
@@ -1269,6 +1277,8 @@ def format_stream_line(line, verbosity=0, timestamps=False):
         event = json.loads(line)
     except json.JSONDecodeError:
         return line
+    if not isinstance(event, dict):
+        return None
 
     etype = event.get("type", "")
     ts_prefix = _format_ts(event.get("timestamp")) if timestamps else ""

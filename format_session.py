@@ -436,6 +436,8 @@ def get_session_info(path):
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(event, dict):
+                    continue
                 event_count += 1
                 ts = event.get("timestamp")
                 if ts:
@@ -780,6 +782,8 @@ def main():
                 continue
             try:
                 event = json.loads(line)
+                if not isinstance(event, dict):
+                    continue
                 events.append(event)
             except json.JSONDecodeError as e:
                 print(f"Warning: skipping malformed JSON on line {line_num}: {e}", file=sys.stderr)
