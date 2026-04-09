@@ -1990,8 +1990,12 @@ def complete_task(db, name, agent_output, agent_id=None):
         # Trim result_value: stop at quotes, braces, or excessive length
         # (guards against JSON blobs leaking in from jsonl output)
         raw_value = markers[-1][1].strip()
-        if raw_value and (raw_value[0] in '"{[' or len(raw_value) > 100):
+        if raw_value and raw_value[0] in '"{[':
             raw_value = None
+        elif raw_value and len(raw_value) > 100:
+            # Try to extract just the leading N/M value (e.g., "673/673")
+            nm = re.match(r'(\d+/\d+)', raw_value)
+            raw_value = nm.group(1) if nm else None
         result_value = raw_value or None
     else:
         result_status = "failure"
@@ -2502,21 +2506,23 @@ def main():
             if not run:
                 print(f"Error: task '{name}' has no runs yet")
                 sys.exit(1)
-            # Find session files to scan (chat session, subagent log, old session)
+            # Find session files to scan (old session, subagent log, chat session)
+            # Order matters: last TASK_RESULT wins, so chat continuation
+            # (where user may have corrected the result) must be scanned last.
             paths_to_scan = []
-            if run["chat_session_id"]:
-                p = os.path.expanduser(f"~/.claude/projects/-home-claude/{run['chat_session_id']}.jsonl")
+            session_id = run["session_id"]
+            if not session_id and run["log_path"]:
+                session_id = extract_session_id(run["log_path"])
+            if session_id:
+                p = os.path.expanduser(f"~/.claude/projects/-home-claude/{session_id}.jsonl")
                 if os.path.exists(p):
                     paths_to_scan.append(p)
             if run["agent_id"]:
                 p = find_subagent_log(run["agent_id"])
                 if p:
                     paths_to_scan.append(p)
-            session_id = run["session_id"]
-            if not session_id and run["log_path"]:
-                session_id = extract_session_id(run["log_path"])
-            if session_id:
-                p = os.path.expanduser(f"~/.claude/projects/-home-claude/{session_id}.jsonl")
+            if run["chat_session_id"]:
+                p = os.path.expanduser(f"~/.claude/projects/-home-claude/{run['chat_session_id']}.jsonl")
                 if os.path.exists(p):
                     paths_to_scan.append(p)
             if not paths_to_scan:
@@ -2546,8 +2552,12 @@ def main():
                                 if raw.startswith("if "):
                                     continue
                                 # Guard against JSON blobs
-                                if raw and (raw[0] in '"{[' or len(raw) > 100):
+                                if raw and raw[0] in '"{[':
                                     raw = None
+                                elif raw and len(raw) > 100:
+                                    # Extract just the leading N/M value
+                                    nm = re.match(r'(\d+/\d+)', raw)
+                                    raw = nm.group(1) if nm else None
                                 result_status = markers[-1][0].lower()
                                 result_value = raw or None
             if not result_status:
