@@ -345,6 +345,8 @@ def parse_log(path):
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(event, dict):
+                    continue
 
                 etype = event.get("type")
 
