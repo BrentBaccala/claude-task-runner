@@ -191,6 +191,11 @@ def main():
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
 
+    # Refresh the sessions cache table so new .claude sessions are visible
+    # before we query it (mtime-gated, so cheap on re-runs).
+    from format_session import scan_sessions
+    scan_sessions(db)
+
     # Get all non-task sessions with messages
     sessions = db.execute("""
         SELECT session_id, display_name, custom_title, is_task, first_user_msg
