@@ -543,6 +543,77 @@ as your very last Playwright action** before finishing. If you don't, the
 Chromium process stays alive and the task runner hangs waiting for the
 agent to exit.
 
+## Sending Messages to a Running Task (`--send`)
+
+`--send NAME "message"` lets you push a live instruction into a running task's
+context mid-run. The message is queued in the `inbox` table and delivered on
+the agent's next turn, wrapped in `<task-inbox>...</task-inbox>` tags.
+
+```bash
+task_runner.py --send my-task "also benchmark with -O3"
+```
+
+Messages can be queued before the agent launches — they stay keyed to
+`task_id` with `agent_id` NULL until `--set-agent-id` backfills them onto
+the newly-started agent.
+
+### Installing the hooks
+
+Delivery relies on two hooks in `~/.claude/settings.json` that invoke
+`task_runner.py --drain-inbox`. Install them by merging the following into
+the `hooks` object (or adding them alongside any existing `PreToolUse` /
+`UserPromptSubmit` entries):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/claude/.local/bin/task_runner.py --drain-inbox"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/claude/.local/bin/task_runner.py --drain-inbox"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Notes:
+
+- Use the **absolute path** to `task_runner.py`. Hooks run in a reduced
+  environment and `~/.local/bin` may not be on `PATH`. Adjust the path if
+  your install lives elsewhere.
+- The `PreToolUse` matcher is `.*` so the hook fires on every tool call.
+  If you already have a specific `PreToolUse` entry (e.g., the
+  EnterPlanMode redirect below), add this as a separate entry — don't
+  overwrite the existing one.
+- `--drain-inbox` is a no-op when the hook JSON has no `agent_id` (i.e.,
+  when the hook fires in the top-level interactive session rather than a
+  subagent). This means the hook is safe to leave installed globally; it
+  only delivers messages to subagents that have been targeted.
+- Messages appear in the agent's context as:
+  ```
+  <task-inbox>
+  your message here
+  </task-inbox>
+  ```
+  Task prompt boilerplate tells agents to treat these as authoritative
+  user direction.
+
 ## Plan Mode Redirect
 
 If the user asks you to redirect plan mode to the task runner, add a
