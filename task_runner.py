@@ -548,7 +548,21 @@ def get_db():
 
 
 def _migrate(db):
-    """Apply schema migrations for new columns (idempotent)."""
+    """Apply schema migrations for new columns and tables (idempotent)."""
+    # Inbox table for --send / --drain-inbox (hook-injected messages to running tasks)
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS inbox (
+        id INTEGER PRIMARY KEY,
+        task_id INTEGER REFERENCES tasks(id),
+        agent_id TEXT,
+        message TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        delivered_at TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS inbox_agent_undelivered ON inbox(agent_id, delivered_at);
+    CREATE INDEX IF NOT EXISTS inbox_task_undelivered ON inbox(task_id, delivered_at);
+    """)
+
     # Collect existing columns for each table
     def has_column(table, column):
         cols = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -1613,8 +1627,100 @@ def set_agent_id(db, name, agent_id):
     db.execute("UPDATE runs SET agent_id = ? WHERE id = ?", (agent_id, run["id"]))
     # Mark the task as running now that an agent is actually executing
     db.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (task["id"],))
+    # Claim queued inbox messages for this task (set before an agent existed) for this agent.
+    claimed = db.execute(
+        "UPDATE inbox SET agent_id = ? "
+        "WHERE task_id = ? AND agent_id IS NULL AND delivered_at IS NULL",
+        (agent_id, task["id"]),
+    ).rowcount
     db.commit()
     print(f"Recorded agent_id {agent_id} for task '{name}' (run {run['id']})")
+    if claimed:
+        print(f"Claimed {claimed} queued inbox message(s) for agent {agent_id}")
+    return True
+
+
+def send_message(db, name, message):
+    """Queue a message for the agent running task `name`.
+
+    If the task has a current run with an agent_id, the message is stamped
+    with that agent_id and will be delivered on the next hook fire. Otherwise
+    it is queued against task_id and `set_agent_id` will claim it later.
+    """
+    task = db.execute("SELECT id, status FROM tasks WHERE name = ?", (name,)).fetchone()
+    if task is None:
+        print(f"Error: task '{name}' not found", file=sys.stderr)
+        return False
+    # Only stamp agent_id from a live run (finished_at IS NULL). Otherwise queue
+    # to task_id so the next run claims it via set_agent_id's backfill.
+    agent_id = None
+    if task["status"] == "running":
+        run = db.execute(
+            "SELECT agent_id FROM runs WHERE task_id = ? AND finished_at IS NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (task["id"],),
+        ).fetchone()
+        if run and run["agent_id"]:
+            agent_id = run["agent_id"]
+    db.execute(
+        "INSERT INTO inbox (task_id, agent_id, message) VALUES (?, ?, ?)",
+        (task["id"], agent_id, message),
+    )
+    db.commit()
+    if agent_id:
+        print(f"Queued message for task '{name}' (agent {agent_id})")
+    else:
+        print(f"Queued message for task '{name}' (will be claimed when agent launches)")
+    return True
+
+
+def drain_inbox(db):
+    """Hook entry point. Reads hook JSON on stdin, emits queued messages.
+
+    Routing key is `agent_id` (subagent hooks include it). If the hook fired
+    outside a subagent (no agent_id), nothing is emitted.
+
+    Output format depends on hook_event_name:
+    - UserPromptSubmit / SessionStart: plain stdout is injected into context.
+    - Everything else: emit JSON with hookSpecificOutput.additionalContext.
+    """
+    try:
+        data = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        # Nothing sensible to do; silently succeed so we don't block the turn.
+        return True
+
+    agent_id = data.get("agent_id")
+    event = data.get("hook_event_name") or ""
+    if not agent_id:
+        return True
+
+    rows = db.execute(
+        "SELECT id, message FROM inbox "
+        "WHERE agent_id = ? AND delivered_at IS NULL ORDER BY id",
+        (agent_id,),
+    ).fetchall()
+    if not rows:
+        return True
+
+    db.executemany(
+        "UPDATE inbox SET delivered_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [(r["id"],) for r in rows],
+    )
+    db.commit()
+
+    body = "\n".join(r["message"] for r in rows)
+    wrapped = f"<task-inbox>\n{body}\n</task-inbox>"
+
+    if event in ("UserPromptSubmit", "SessionStart"):
+        print(wrapped)
+    else:
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "additionalContext": wrapped,
+            }
+        }))
     return True
 
 
@@ -1916,6 +2022,12 @@ def prepare_task(db, name):
         f"build succeeded), not just whether you completed your analysis.\n\n"
         f"Do NOT run Bash commands in the background (no run_in_background on Bash).\n"
         f"Run all commands synchronously so output is captured in your response.\n"
+        f"\n"
+        f"If a message wrapped in <task-inbox>...</task-inbox> tags appears in\n"
+        f"your context during the run, it is a live instruction sent by the user\n"
+        f"while this task is in flight (delivered via a hook, not present in the\n"
+        f"original prompt). Treat its contents as authoritative user direction\n"
+        f"and incorporate it into your work.\n"
     )
 
     # Output metadata to stderr, prompt to stdout
@@ -2099,6 +2211,10 @@ def main():
     parser.add_argument("--tail", metavar="NAME", help="Tail live output of a running task's subagent")
     parser.add_argument("--set-agent-id", metavar=("NAME", "AGENT_ID"), nargs=2,
                         help="Record the Agent tool's agent ID for --tail")
+    parser.add_argument("--send", metavar=("NAME", "MESSAGE"), nargs=2,
+                        help="Queue a message to be delivered to the task's agent on its next turn")
+    parser.add_argument("--drain-inbox", action="store_true",
+                        help="Hook entry point: read hook JSON on stdin, emit queued messages to stdout")
     parser.add_argument("--chat", metavar="NAME", help="Interactive session continuing a task's last agent run")
     parser.add_argument("--kill", metavar="NAME", help="Mark a running task as interrupted")
     parser.add_argument("--sync", metavar="NAME", help="Update task status from chat continuation results")
@@ -2357,6 +2473,14 @@ def main():
         name = resolve_task_name(db, args.set_agent_id[0])
         if name:
             set_agent_id(db, name, args.set_agent_id[1])
+    elif args.send:
+        name = resolve_task_name(db, args.send[0])
+        if name is None:
+            sys.exit(1)
+        if not send_message(db, name, args.send[1]):
+            sys.exit(1)
+    elif args.drain_inbox:
+        drain_inbox(db)
     elif args.chat:
         name = resolve_task_name(db, args.chat)
         if name:

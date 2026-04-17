@@ -80,6 +80,7 @@ task_runner.py --hold NAME              # Pause a pending task
 task_runner.py --unhold NAME            # Resume a held task
 task_runner.py --kill NAME              # Mark a running task as interrupted
 task_runner.py --sync NAME              # Update task status from session results
+task_runner.py --send NAME "message"    # Queue a message delivered to the task's agent on its next turn
 task_runner.py --backup                 # Export sessions, commit, push to backup remote
 
 # Creating (write prompt to prompts/NAME first)

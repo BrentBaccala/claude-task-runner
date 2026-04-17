@@ -86,6 +86,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     file_size INTEGER,
     deleted INTEGER DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS inbox (
+    id INTEGER PRIMARY KEY,
+    task_id INTEGER REFERENCES tasks(id),
+    agent_id TEXT,
+    message TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    delivered_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS inbox_agent_undelivered ON inbox(agent_id, delivered_at);
+CREATE INDEX IF NOT EXISTS inbox_task_undelivered ON inbox(task_id, delivered_at);
 """
 
 
