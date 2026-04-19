@@ -1677,8 +1677,12 @@ def send_message(db, name, message):
 def drain_inbox(db):
     """Hook entry point. Reads hook JSON on stdin, emits queued messages.
 
-    Routing key is `agent_id` (subagent hooks include it). If the hook fired
-    outside a subagent (no agent_id), nothing is emitted.
+    Two routing paths:
+    - Subagent hooks: match inbox rows by `agent_id`.
+    - Top-level interactive hooks: match the hook's `session_id` against
+      `runs.chat_session_id`, then deliver unclaimed (agent_id IS NULL)
+      inbox rows for that task. This covers `--chat` sessions where the
+      user is conversing with a task's prior run outside a subagent.
 
     Output format depends on hook_event_name:
     - UserPromptSubmit / SessionStart: plain stdout is injected into context.
@@ -1691,15 +1695,32 @@ def drain_inbox(db):
         return True
 
     agent_id = data.get("agent_id")
+    session_id = data.get("session_id")
     event = data.get("hook_event_name") or ""
-    if not agent_id:
+
+    if agent_id:
+        rows = db.execute(
+            "SELECT id, message FROM inbox "
+            "WHERE agent_id = ? AND delivered_at IS NULL ORDER BY id",
+            (agent_id,),
+        ).fetchall()
+    elif session_id:
+        task_row = db.execute(
+            "SELECT task_id FROM runs WHERE chat_session_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if not task_row:
+            return True
+        rows = db.execute(
+            "SELECT id, message FROM inbox "
+            "WHERE task_id = ? AND agent_id IS NULL AND delivered_at IS NULL "
+            "ORDER BY id",
+            (task_row["task_id"],),
+        ).fetchall()
+    else:
         return True
 
-    rows = db.execute(
-        "SELECT id, message FROM inbox "
-        "WHERE agent_id = ? AND delivered_at IS NULL ORDER BY id",
-        (agent_id,),
-    ).fetchall()
     if not rows:
         return True
 
