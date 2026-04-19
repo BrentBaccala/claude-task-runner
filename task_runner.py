@@ -1671,16 +1671,30 @@ def send_message(db, name, message):
         print(f"Queued message for task '{name}' (agent {agent_id})")
     else:
         # Check for a chat session that could pick it up via drain_inbox's
-        # session_id fallback.
+        # session_id fallback. We only mention it if a claude process is
+        # actually attached to that session — chat_task launches
+        # `claude --resume <session_id>`, so matching the UUID in any
+        # process's cmdline is reliable.
         chat_run = db.execute(
             "SELECT chat_session_id FROM runs WHERE task_id = ? "
             "AND chat_session_id IS NOT NULL ORDER BY id DESC LIMIT 1",
             (task["id"],),
         ).fetchone()
+        cs_active = False
         if chat_run:
+            import psutil
+            cs_id = chat_run["chat_session_id"]
+            for p in psutil.process_iter(["cmdline"]):
+                try:
+                    if any(cs_id in arg for arg in (p.info["cmdline"] or [])):
+                        cs_active = True
+                        break
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        if cs_active:
             print(f"Queued message for task '{name}' "
                   f"(chat session {chat_run['chat_session_id'][:8]} will pick it up "
-                  f"on its next turn, or a new agent will claim it)")
+                  f"on its next turn)")
         else:
             print(f"Queued message for task '{name}' (will be claimed when agent launches)")
     return True
