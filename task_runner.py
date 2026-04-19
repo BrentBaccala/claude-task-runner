@@ -1670,7 +1670,19 @@ def send_message(db, name, message):
     if agent_id:
         print(f"Queued message for task '{name}' (agent {agent_id})")
     else:
-        print(f"Queued message for task '{name}' (will be claimed when agent launches)")
+        # Check for a chat session that could pick it up via drain_inbox's
+        # session_id fallback.
+        chat_run = db.execute(
+            "SELECT chat_session_id FROM runs WHERE task_id = ? "
+            "AND chat_session_id IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (task["id"],),
+        ).fetchone()
+        if chat_run:
+            print(f"Queued message for task '{name}' "
+                  f"(chat session {chat_run['chat_session_id'][:8]} will pick it up "
+                  f"on its next turn, or a new agent will claim it)")
+        else:
+            print(f"Queued message for task '{name}' (will be claimed when agent launches)")
     return True
 
 
