@@ -2258,8 +2258,9 @@ def main():
     parser.add_argument("--tail", metavar="NAME", help="Tail live output of a running task's subagent")
     parser.add_argument("--set-agent-id", metavar=("NAME", "AGENT_ID"), nargs=2,
                         help="Record the Agent tool's agent ID for --tail")
-    parser.add_argument("--send", metavar=("NAME", "MESSAGE"), nargs=2,
-                        help="Queue a message to be delivered to the task's agent on its next turn")
+    parser.add_argument("--send", metavar="NAME_MSG", nargs="+",
+                        help="Queue a message to be delivered to the task's agent on its next turn. "
+                             "Usage: --send NAME MESSAGE, or --send NAME (reads message from stdin)")
     parser.add_argument("--drain-inbox", action="store_true",
                         help="Hook entry point: read hook JSON on stdin, emit queued messages to stdout")
     parser.add_argument("--chat", metavar="NAME", help="Interactive session continuing a task's last agent run")
@@ -2521,10 +2522,17 @@ def main():
         if name:
             set_agent_id(db, name, args.set_agent_id[1])
     elif args.send:
+        if len(args.send) == 1:
+            message = sys.stdin.read()
+        elif len(args.send) == 2:
+            message = args.send[1]
+        else:
+            print("--send takes 1 or 2 arguments: NAME [MESSAGE]", file=sys.stderr)
+            sys.exit(1)
         name = resolve_task_name(db, args.send[0])
         if name is None:
             sys.exit(1)
-        if not send_message(db, name, args.send[1]):
+        if not send_message(db, name, message):
             sys.exit(1)
     elif args.drain_inbox:
         drain_inbox(db)
