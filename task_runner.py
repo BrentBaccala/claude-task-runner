@@ -1700,6 +1700,55 @@ def send_message(db, name, message):
     return True
 
 
+def show_inbox(db, name=None):
+    """Show inbox messages with delivery status.
+
+    Without `name`: shows all messages across all tasks, most recent first.
+    With `name`: shows only messages for that task.
+    """
+    if name is not None:
+        task = db.execute("SELECT id FROM tasks WHERE name = ?", (name,)).fetchone()
+        if task is None:
+            print(f"Error: task '{name}' not found", file=sys.stderr)
+            return False
+        rows = db.execute(
+            "SELECT i.id, i.task_id, i.agent_id, i.message, i.created_at, i.delivered_at, "
+            "  t.name as task_name "
+            "FROM inbox i JOIN tasks t ON t.id = i.task_id "
+            "WHERE i.task_id = ? ORDER BY i.id DESC",
+            (task["id"],),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT i.id, i.task_id, i.agent_id, i.message, i.created_at, i.delivered_at, "
+            "  t.name as task_name "
+            "FROM inbox i JOIN tasks t ON t.id = i.task_id "
+            "ORDER BY i.id DESC"
+        ).fetchall()
+
+    if not rows:
+        print("(no messages)")
+        return True
+
+    def fmt_ts(ts):
+        if not ts:
+            return ""
+        try:
+            return datetime.fromisoformat(ts).strftime("%d %b %H:%M")
+        except (ValueError, TypeError):
+            return ts
+
+    for r in rows:
+        status = f"delivered {fmt_ts(r['delivered_at'])}" if r["delivered_at"] else "queued"
+        agent = r["agent_id"][:16] if r["agent_id"] else "-"
+        print(f"#{r['id']}  task={r['task_name']}  sent={fmt_ts(r['created_at'])}  "
+              f"agent={agent}  [{status}]")
+        for line in r["message"].splitlines() or [""]:
+            print(f"    {line}")
+        print()
+    return True
+
+
 def drain_inbox(db):
     """Hook entry point. Reads hook JSON on stdin, emits queued messages.
 
@@ -2263,6 +2312,9 @@ def main():
                              "Usage: --send NAME MESSAGE, or --send NAME (reads message from stdin)")
     parser.add_argument("--drain-inbox", action="store_true",
                         help="Hook entry point: read hook JSON on stdin, emit queued messages to stdout")
+    parser.add_argument("--inbox", metavar="NAME", nargs="?", const="",
+                        help="Show inbox messages and their delivery status. "
+                             "Usage: --inbox (all tasks), or --inbox NAME (one task)")
     parser.add_argument("--chat", metavar="NAME", help="Interactive session continuing a task's last agent run")
     parser.add_argument("--kill", metavar="NAME", help="Mark a running task as interrupted")
     parser.add_argument("--sync", metavar="NAME", help="Update task status from chat continuation results")
@@ -2536,6 +2588,14 @@ def main():
             sys.exit(1)
     elif args.drain_inbox:
         drain_inbox(db)
+    elif args.inbox is not None:
+        if args.inbox == "":
+            show_inbox(db)
+        else:
+            name = resolve_task_name(db, args.inbox)
+            if name is None:
+                sys.exit(1)
+            show_inbox(db, name)
     elif args.chat:
         name = resolve_task_name(db, args.chat)
         if name:
