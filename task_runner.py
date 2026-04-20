@@ -2351,6 +2351,8 @@ def main():
     parser.add_argument("--inbox", metavar="NAME", nargs="?", const="",
                         help="Show inbox messages and their delivery status. "
                              "Usage: --inbox (all tasks), or --inbox NAME (one task)")
+    parser.add_argument("--clear-inbox", action="store_true", dest="clear_inbox",
+                        help="Delete all rows from the inbox table (including delivered history)")
     parser.add_argument("--chat", metavar="NAME", help="Interactive session continuing a task's last agent run")
     parser.add_argument("--kill", metavar="NAME", help="Mark a running task as interrupted")
     parser.add_argument("--sync", metavar="NAME", help="Update task status from chat continuation results")
@@ -2646,6 +2648,11 @@ def main():
             if name is None:
                 sys.exit(1)
             show_inbox(db, name)
+    elif args.clear_inbox:
+        n = db.execute("SELECT COUNT(*) FROM inbox").fetchone()[0]
+        db.execute("DELETE FROM inbox")
+        db.commit()
+        print(f"Deleted {n} inbox row{'s' if n != 1 else ''}")
     elif args.chat:
         name = resolve_task_name(db, args.chat)
         if name:
