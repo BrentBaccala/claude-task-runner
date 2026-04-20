@@ -584,6 +584,7 @@ def _migrate(db):
         ("runs", "cache_write_tokens", "ALTER TABLE runs ADD COLUMN cache_write_tokens INTEGER"),
         ("runs", "agent_id", "ALTER TABLE runs ADD COLUMN agent_id TEXT"),
         ("runs", "chat_session_id", "ALTER TABLE runs ADD COLUMN chat_session_id TEXT"),
+        ("inbox", "session_id", "ALTER TABLE inbox ADD COLUMN session_id TEXT"),
     ]
 
     applied = 0
@@ -1700,6 +1701,22 @@ def send_message(db, name, message):
     return True
 
 
+def send_session_message(db, session_id, message):
+    """Queue a message for delivery to a specific Claude Code session.
+
+    Delivered by drain_inbox when a hook fires with matching session_id.
+    Not tied to any task.
+    """
+    db.execute(
+        "INSERT INTO inbox (task_id, agent_id, session_id, message) "
+        "VALUES (NULL, NULL, ?, ?)",
+        (session_id, message),
+    )
+    db.commit()
+    print(f"Queued message for session {session_id[:8]} (will be delivered on its next hook fire)")
+    return True
+
+
 def show_inbox(db, name=None):
     """Show inbox messages with delivery status.
 
@@ -1712,17 +1729,17 @@ def show_inbox(db, name=None):
             print(f"Error: task '{name}' not found", file=sys.stderr)
             return False
         rows = db.execute(
-            "SELECT i.id, i.task_id, i.agent_id, i.message, i.created_at, i.delivered_at, "
-            "  t.name as task_name "
-            "FROM inbox i JOIN tasks t ON t.id = i.task_id "
+            "SELECT i.id, i.task_id, i.agent_id, i.session_id, i.message, "
+            "  i.created_at, i.delivered_at, t.name as task_name "
+            "FROM inbox i LEFT JOIN tasks t ON t.id = i.task_id "
             "WHERE i.task_id = ? ORDER BY i.id DESC",
             (task["id"],),
         ).fetchall()
     else:
         rows = db.execute(
-            "SELECT i.id, i.task_id, i.agent_id, i.message, i.created_at, i.delivered_at, "
-            "  t.name as task_name "
-            "FROM inbox i JOIN tasks t ON t.id = i.task_id "
+            "SELECT i.id, i.task_id, i.agent_id, i.session_id, i.message, "
+            "  i.created_at, i.delivered_at, t.name as task_name "
+            "FROM inbox i LEFT JOIN tasks t ON t.id = i.task_id "
             "ORDER BY i.id DESC"
         ).fetchall()
 
@@ -1740,8 +1757,14 @@ def show_inbox(db, name=None):
 
     for r in rows:
         status = f"delivered {fmt_ts(r['delivered_at'])}" if r["delivered_at"] else "queued"
+        if r["task_name"]:
+            target = f"task={r['task_name']}"
+        elif r["session_id"]:
+            target = f"session={r['session_id'][:8]}"
+        else:
+            target = "target=?"
         agent = r["agent_id"][:16] if r["agent_id"] else "-"
-        print(f"#{r['id']}  task={r['task_name']}  sent={fmt_ts(r['created_at'])}  "
+        print(f"#{r['id']}  {target}  sent={fmt_ts(r['created_at'])}  "
               f"agent={agent}  [{status}]")
         for line in r["message"].splitlines() or [""]:
             print(f"    {line}")
@@ -1780,19 +1803,28 @@ def drain_inbox(db):
             (agent_id,),
         ).fetchall()
     elif session_id:
+        # Direct session-targeted rows (from --send-session), plus any
+        # task-keyed rows attached to a --chat session matching this session_id.
         task_row = db.execute(
             "SELECT task_id FROM runs WHERE chat_session_id = ? "
             "ORDER BY id DESC LIMIT 1",
             (session_id,),
         ).fetchone()
-        if not task_row:
-            return True
-        rows = db.execute(
-            "SELECT id, message FROM inbox "
-            "WHERE task_id = ? AND agent_id IS NULL AND delivered_at IS NULL "
-            "ORDER BY id",
-            (task_row["task_id"],),
-        ).fetchall()
+        if task_row:
+            rows = db.execute(
+                "SELECT id, message FROM inbox "
+                "WHERE delivered_at IS NULL AND ("
+                "  session_id = ? OR "
+                "  (task_id = ? AND agent_id IS NULL)"
+                ") ORDER BY id",
+                (session_id, task_row["task_id"]),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT id, message FROM inbox "
+                "WHERE session_id = ? AND delivered_at IS NULL ORDER BY id",
+                (session_id,),
+            ).fetchall()
     else:
         return True
 
@@ -2310,6 +2342,10 @@ def main():
     parser.add_argument("--send", metavar="NAME_MSG", nargs="+",
                         help="Queue a message to be delivered to the task's agent on its next turn. "
                              "Usage: --send NAME MESSAGE, or --send NAME (reads message from stdin)")
+    parser.add_argument("--send-session", metavar="UUID_MSG", nargs="+",
+                        dest="send_session",
+                        help="Queue a message delivered to a specific Claude Code session. "
+                             "Usage: --send-session UUID MESSAGE, or --send-session UUID (stdin)")
     parser.add_argument("--drain-inbox", action="store_true",
                         help="Hook entry point: read hook JSON on stdin, emit queued messages to stdout")
     parser.add_argument("--inbox", metavar="NAME", nargs="?", const="",
@@ -2585,6 +2621,20 @@ def main():
         if name is None:
             sys.exit(1)
         if not send_message(db, name, message):
+            sys.exit(1)
+    elif args.send_session:
+        if len(args.send_session) == 1:
+            message = sys.stdin.read()
+        elif len(args.send_session) == 2:
+            message = args.send_session[1]
+        else:
+            print("--send-session takes 1 or 2 arguments: UUID [MESSAGE]", file=sys.stderr)
+            sys.exit(1)
+        session_id = args.send_session[0]
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", session_id):
+            print(f"Error: '{session_id}' is not a valid session UUID", file=sys.stderr)
+            sys.exit(1)
+        if not send_session_message(db, session_id, message):
             sys.exit(1)
     elif args.drain_inbox:
         drain_inbox(db)
