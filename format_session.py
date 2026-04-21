@@ -39,8 +39,12 @@ def truncate(s, maxlen):
     return s[: maxlen - 3] + "..."
 
 
-def format_tool_args(name, input_dict):
-    """Format tool_use input as a readable arg summary."""
+def format_tool_args(name, input_dict, truncate_strings=True):
+    """Format tool_use input as a readable arg summary.
+
+    When `truncate_strings` is False, strings are not cut to 60 chars —
+    long Bash commands and Grep patterns render in full (wrapped by caller).
+    """
     if not isinstance(input_dict, dict):
         return ""
 
@@ -69,7 +73,8 @@ def format_tool_args(name, input_dict):
         if arg in input_dict:
             val = input_dict[arg]
             if isinstance(val, str):
-                val = truncate(val, 60)
+                if truncate_strings:
+                    val = truncate(val, 60)
                 parts.append(f'{arg}: "{val}"')
             elif isinstance(val, bool):
                 parts.append(f"{arg}: {str(val).lower()}")
@@ -330,11 +335,8 @@ def render_assistant(content_blocks, width, show_thinking=False, show_tools=Fals
 
         elif btype == "tool_use" and show_tools:
             name = block.get("name", "unknown")
-            args = format_tool_args(name, block.get("input", {}))
-            tool_line = f"● {name}({args})"
-            if len(tool_line) > width:
-                tool_line = tool_line[: width - 3] + "..."
-            yield tool_line
+            args = format_tool_args(name, block.get("input", {}), truncate_strings=False)
+            yield wrap_text(f"{name}({args})", width, "● ", "  ")
 
 
 _script_dir = os.path.dirname(os.path.realpath(__file__))
@@ -723,12 +725,16 @@ def main():
         "--system", action="store_true", help="Show system messages"
     )
     parser.add_argument(
+        "-v", "--verbose", action="count", default=0,
+        help="Verbosity level: -v shows tool calls, -vv also shows tool output"
+    )
+    parser.add_argument(
         "--tools", action="store_true",
-        help="Show tool calls (hidden by default)"
+        help="Show tool calls (hidden by default). Equivalent to -v."
     )
     parser.add_argument(
         "--tool-output", action="store_true",
-        help="Show tool results (hidden by default; implies --tools)"
+        help="Show tool results (hidden by default; implies --tools). Equivalent to -vv."
     )
     parser.add_argument(
         "--tool-output-lines", type=int, default=20, metavar="N",
@@ -747,6 +753,11 @@ def main():
         help="Show timestamps on each message"
     )
     args = parser.parse_args()
+
+    if args.verbose >= 1:
+        args.tools = True
+    if args.verbose >= 2:
+        args.tool_output = True
 
     if args.all:
         args.thinking = True
