@@ -1701,6 +1701,45 @@ def send_message(db, name, message):
     return True
 
 
+def resolve_session_id(db, ref):
+    """Resolve a session reference to a full session UUID.
+
+    Accepts: full UUID, session_id prefix, display_name, or custom_title
+    (the last two are set via `format_session.py --name` or /rename in-chat).
+    Returns the UUID string, or None on miss/ambiguity (error printed).
+    """
+    # Full UUID — accept as-is even if not in the sessions cache
+    if re.fullmatch(r"[0-9a-fA-F-]{36}", ref):
+        return ref
+
+    # Refresh the sessions cache so recent renames are picked up
+    try:
+        import format_session
+        format_session.scan_sessions(db)
+    except ImportError:
+        pass
+
+    rows = db.execute("""
+        SELECT session_id, display_name, custom_title FROM sessions
+        WHERE deleted = 0 AND (
+            display_name = ? COLLATE NOCASE
+            OR custom_title = ? COLLATE NOCASE
+            OR session_id LIKE ? || '%'
+        )
+    """, (ref, ref, ref)).fetchall()
+
+    if len(rows) == 1:
+        return rows[0][0]
+    if len(rows) == 0:
+        print(f"Error: no session matching '{ref}'", file=sys.stderr)
+        return None
+    print(f"Error: ambiguous session '{ref}', matches:", file=sys.stderr)
+    for sid, display_name, custom_title in rows:
+        label = display_name or custom_title or ""
+        print(f"  {sid}  {label}", file=sys.stderr)
+    return None
+
+
 def send_session_message(db, session_id, message):
     """Queue a message for delivery to a specific Claude Code session.
 
@@ -2342,10 +2381,11 @@ def main():
     parser.add_argument("--send", metavar="NAME_MSG", nargs="+",
                         help="Queue a message to be delivered to the task's agent on its next turn. "
                              "Usage: --send NAME MESSAGE, or --send NAME (reads message from stdin)")
-    parser.add_argument("--send-session", metavar="UUID_MSG", nargs="+",
+    parser.add_argument("--send-session", metavar="SESSION_MSG", nargs="+",
                         dest="send_session",
                         help="Queue a message delivered to a specific Claude Code session. "
-                             "Usage: --send-session UUID MESSAGE, or --send-session UUID (stdin)")
+                             "SESSION may be a UUID, UUID prefix, display_name, or custom_title. "
+                             "Usage: --send-session SESSION MESSAGE, or --send-session SESSION (stdin)")
     parser.add_argument("--drain-inbox", action="store_true",
                         help="Hook entry point: read hook JSON on stdin, emit queued messages to stdout")
     parser.add_argument("--inbox", metavar="NAME", nargs="?", const="",
@@ -2632,9 +2672,8 @@ def main():
         else:
             print("--send-session takes 1 or 2 arguments: UUID [MESSAGE]", file=sys.stderr)
             sys.exit(1)
-        session_id = args.send_session[0]
-        if not re.fullmatch(r"[0-9a-fA-F-]{36}", session_id):
-            print(f"Error: '{session_id}' is not a valid session UUID", file=sys.stderr)
+        session_id = resolve_session_id(db, args.send_session[0])
+        if session_id is None:
             sys.exit(1)
         if not send_session_message(db, session_id, message):
             sys.exit(1)
