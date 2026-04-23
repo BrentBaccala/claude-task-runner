@@ -734,7 +734,8 @@ def show_activity(db, limit=20):
     # Task runs (including chat continuations)
     runs = db.execute("""
         SELECT r.id as run_id, t.name, t.id as task_id, r.started_at, r.finished_at,
-               r.success, r.result_value, r.cost_usd, r.chat_session_id
+               r.success, r.result_value, r.cost_usd, r.chat_session_id, r.agent_id,
+               r.id < MAX(r.id) OVER (PARTITION BY r.task_id) as has_later_run
         FROM runs r JOIN tasks t ON r.task_id = t.id
         WHERE r.started_at IS NOT NULL
         ORDER BY r.started_at DESC
@@ -745,13 +746,18 @@ def show_activity(db, limit=20):
         finished = r["finished_at"]
         status = "OK" if r["success"] else "FAIL"
         if not finished:
-            status = "RUNNING"
+            if r["agent_id"]:
+                status = "RUNNING"
+            elif r["has_later_run"]:
+                status = "STALE"
+            else:
+                status = "PREPARED"
         result = r["result_value"] or ""
         cost = f"${r['cost_usd']:.2f}" if r["cost_usd"] else ""
         name = r["name"]
         # Use finished_at for sorting (most recent activity), fall back to started_at
         sort_ts = finished or started
-        events.append((sort_ts, "task", f"{status:<7s} {cost:>7s}  {result:<10s}  {name} (run {r['run_id']})"))
+        events.append((sort_ts, "task", str(r["run_id"]), f"{status:<7s} {cost:>7s}  {result:<10s}  {name}"))
 
         # Chat continuation: show as separate entry if it exists
         if r["chat_session_id"]:
@@ -776,7 +782,7 @@ def show_activity(db, limit=20):
                 except OSError:
                     pass
                 if last_ts:
-                    events.append((last_ts, "chat", f"{'':>7s} {'':>7s}  {'':>10s}  {name} (chat continuation)"))
+                    events.append((last_ts, "chat", "", f"{'':>7s} {'':>7s}  {'':>10s}  {name} (chat continuation)"))
 
     # Interactive sessions
     sessions = db.execute("""
@@ -790,16 +796,16 @@ def show_activity(db, limit=20):
         name = s["display_name"] or s["session_id"][:12]
         msgs = s["user_msg_count"] or 0
         sort_ts = s["last_ts"] or s["first_ts"] or ""
-        events.append((sort_ts, "session", f"{'':>7s} {'':>7s}  {msgs:>3d} msgs    {name}"))
+        events.append((sort_ts, "session", "", f"{'':>7s} {'':>7s}  {msgs:>3d} msgs    {name}"))
 
     # Sort by timestamp descending and truncate
     events.sort(key=lambda x: x[0] or "", reverse=True)
     events = events[:limit]
 
     # Format timestamps and print
-    print(f"{'When':<14s}  {'Type':<7s}  {'Status':>7s} {'Cost':>7s}  {'Result':<10s}  Description")
-    print("─" * 90)
-    for ts, etype, detail in events:
+    print(f"{'When':<14s}  {'Type':<7s}  {'Run':>4s}  {'Status':<7s} {'Cost':>7s}  {'Result':<10s}  Description")
+    print("─" * 95)
+    for ts, etype, run_str, detail in events:
         when = ""
         if ts:
             try:
@@ -808,7 +814,7 @@ def show_activity(db, limit=20):
                 when = local_dt.strftime("%-d %b %H:%M")
             except (ValueError, TypeError):
                 when = ts[:16]
-        print(f"{when:<14s}  {etype:<7s}  {detail}")
+        print(f"{when:<14s}  {etype:<7s}  {run_str:>4s}  {detail}")
 
 
 def show_status(db):
