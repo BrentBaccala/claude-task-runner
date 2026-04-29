@@ -18,6 +18,7 @@ Claude Code CLI:
 import json
 import os
 import pathlib
+import re
 import sqlite3
 import sys
 import textwrap
@@ -351,6 +352,10 @@ _project_owner_home = os.path.expanduser(
     "~" + pathlib.Path(_PROJECT_DIR).owner()
 )
 SESSIONS_DIR = os.path.join(_project_owner_home, ".claude", "projects", "-home-claude")
+# Hardlink backups created by export_sessions.py / `task_runner.py --backup`.
+# When a session file is vacuumed from SESSIONS_DIR, the hardlink here keeps
+# the data alive and lets us still show / view the session.
+BACKUP_SESSIONS_DIR = os.path.join(_PROJECT_DIR, "sessions")
 # Legacy prefix for detecting old task sessions (before DB tracking).
 # New sessions are detected via session_id in the runs table.
 TASK_PROMPT_PREFIX = "You are working on the minimal associated primes computation project."
@@ -368,7 +373,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_msg_count INTEGER DEFAULT 0,
     first_user_msg TEXT,
     file_size INTEGER,
-    deleted INTEGER DEFAULT 0
+    deleted INTEGER DEFAULT 0,
+    backup_path TEXT
 );
 """
 
@@ -377,7 +383,37 @@ def get_db():
     """Connect to tasks.db and ensure sessions table exists."""
     db = sqlite3.connect(TASK_DB)
     db.executescript(SESSIONS_TABLE_SCHEMA)
+    # Migration: add backup_path to pre-existing sessions tables.
+    cols = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
+    if "backup_path" not in cols:
+        try:
+            db.execute("ALTER TABLE sessions ADD COLUMN backup_path TEXT")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass  # read-only DB
     return db
+
+
+def safe_filename(name):
+    """Convert a display name to the filename used by export_sessions.py."""
+    name = name.replace("/", "-").replace("\\", "-")
+    name = name.replace(":", "-").replace("*", "").replace("?", "")
+    name = name.replace('"', "").replace("<", "").replace(">", "")
+    name = name.replace("|", "-")
+    name = re.sub(r"[-\s]+", "-", name)
+    return name.strip("-")
+
+
+def find_backup_path(display_name):
+    """Return the hardlink backup path for a display_name, or None.
+
+    Mirrors the naming used by export_sessions.py: <safe_filename>.jsonl
+    under BACKUP_SESSIONS_DIR. Used to keep vacuumed sessions reachable.
+    """
+    if not display_name or not os.path.isdir(BACKUP_SESSIONS_DIR):
+        return None
+    p = os.path.join(BACKUP_SESSIONS_DIR, safe_filename(display_name) + ".jsonl")
+    return p if os.path.isfile(p) else None
 
 
 def get_task_session_ids():
@@ -550,9 +586,19 @@ def scan_sessions(db):
               info["user_msg_count"], info["first_user_msg"],
               info["size"]))
 
-    # Mark sessions whose files no longer exist
+    # Sessions whose live files are gone: keep them visible if a backup
+    # hardlink under BACKUP_SESSIONS_DIR survived (export_sessions.py's
+    # output). Otherwise mark deleted.
     for sid in cached:
-        if sid not in disk_sids:
+        if sid in disk_sids:
+            continue
+        backup = find_backup_path(cached[sid]["display_name"])
+        if backup:
+            db.execute(
+                "UPDATE sessions SET deleted = 0, backup_path = ? WHERE session_id = ?",
+                (backup, sid),
+            )
+        else:
             db.execute("UPDATE sessions SET deleted = 1 WHERE session_id = ?", (sid,))
 
     db.commit()
@@ -630,7 +676,7 @@ def resolve_session(name):
 
     # Query for matches: display_name, custom_title (case-insensitive), or ID prefix
     rows = db.execute("""
-        SELECT session_id, display_name, custom_title FROM sessions
+        SELECT session_id, display_name, custom_title, backup_path FROM sessions
         WHERE deleted = 0 AND (
             display_name = ? COLLATE NOCASE
             OR custom_title = ? COLLATE NOCASE
@@ -640,14 +686,19 @@ def resolve_session(name):
     db.close()
 
     if len(rows) == 1:
-        sid = rows[0][0]
-        return os.path.join(SESSIONS_DIR, sid + ".jsonl")
+        sid, _, _, backup_path = rows[0]
+        live = os.path.join(SESSIONS_DIR, sid + ".jsonl")
+        if os.path.isfile(live):
+            return live
+        if backup_path and os.path.isfile(backup_path):
+            return backup_path
+        return live  # caller will fail loudly with the live path
     elif len(rows) == 0:
         print(f"No session matching '{name}'", file=sys.stderr)
         sys.exit(1)
     else:
         print(f"Ambiguous session '{name}', matches:", file=sys.stderr)
-        for sid, display_name, custom_title in rows:
+        for sid, display_name, custom_title, _ in rows:
             label = display_name or custom_title or sid
             print(f"  {sid}  {label}", file=sys.stderr)
         sys.exit(1)
