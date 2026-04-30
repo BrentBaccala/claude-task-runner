@@ -2184,6 +2184,8 @@ def prepare_task(db, name):
         f"Task: {name} (run {run_id})\n"
         f"Description: {task['description']}\n\n"
         f"Instructions:\n{prompt}\n\n"
+        f"Closing ritual: before emitting the TASK_RESULT line, invoke the\n"
+        f"`end` skill if one is defined. (If no such skill exists, skip this.)\n\n"
         f"IMPORTANT: As the very last line of your response, write exactly one of:\n"
         f"  TASK_RESULT: SUCCESS\n"
         f"  TASK_RESULT: FAILURE\n"

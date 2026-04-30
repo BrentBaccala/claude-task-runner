@@ -274,6 +274,19 @@ detect progress.
 **Important**: The task runner wraps your prompt with standard context including
 the TASK_RESULT instruction. But for clarity, include it in your prompt too.
 
+### Closing Ritual (`end` skill)
+
+The standard prompt wrapper instructs every agent, before emitting
+its TASK_RESULT line, to invoke the `end` skill if one is defined.
+You can define an `end` skill (in your usual skills directory) that
+will run at the end of every task — useful for closing rituals like
+writing a findings report, extracting a knowledge graph, or saving
+a compaction summary.
+
+If no `end` skill is defined, the agent skips the step. To opt out
+for a specific task, override in the task's prompt (e.g., "skip the
+closing ritual").
+
 ### Long-Running Commands
 
 For commands that take a while (builds, test suites), pipe output through tee
