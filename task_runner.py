@@ -2181,7 +2181,7 @@ def prepare_task(db, name):
 
     # Wrap prompt with standard context for the agent
     full_prompt = (
-        f"Task: {name} (run {run_id})\n"
+        f"Task: {name} (task {task['id']}, run {run_id})\n"
         f"Description: {task['description']}\n\n"
         f"Instructions:\n{prompt}\n\n"
         f"Closing ritual: before emitting the TASK_RESULT line, invoke the\n"
@@ -2741,9 +2741,12 @@ def main():
                                 agent_id = os.path.basename(path).replace("agent-", "").replace(".jsonl", "")
                                 task_name = None
                                 if content.startswith("Task: "):
-                                    # Handle both "Task: name" and "Task: name (run 123)"
+                                    # Handle three preamble formats:
+                                    #   "Task: name"
+                                    #   "Task: name (run 123)"                        — older
+                                    #   "Task: name (task 304, run 511)"              — current
                                     task_line = content.split("\n")[0].replace("Task: ", "").strip()
-                                    task_name = re.sub(r'\s*\(run \d+\)$', '', task_line)
+                                    task_name = re.sub(r'\s*\((?:task \d+, )?run \d+\)$', '', task_line)
                                 subagent_logs.append((agent_id, path, task_name, content))
                             break
             except (json.JSONDecodeError, OSError):
