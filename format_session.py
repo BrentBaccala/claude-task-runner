@@ -351,7 +351,42 @@ from project_dir import PROJECT_DIR as _PROJECT_DIR, DB_PATH as TASK_DB
 _project_owner_home = os.path.expanduser(
     "~" + pathlib.Path(_PROJECT_DIR).owner()
 )
-SESSIONS_DIR = os.path.join(_project_owner_home, ".claude", "projects", "-home-claude")
+# Claude Code shards session JSONLs by cwd: each cwd gets its own
+# subdirectory under PROJECTS_ROOT, named by replacing each "/" in the
+# absolute cwd with "-". `--list` walks every bucket so cross-cwd
+# sessions appear; SESSIONS_DIR is kept as the default bucket for
+# legacy callers and as the fallback when project_dir isn't recorded.
+PROJECTS_ROOT = os.path.join(_project_owner_home, ".claude", "projects")
+DEFAULT_BUCKET = "-home-claude"
+SESSIONS_DIR = os.path.join(PROJECTS_ROOT, DEFAULT_BUCKET)
+
+
+def _list_session_buckets():
+    """Yield (bucket_name, bucket_path) for every project bucket on disk."""
+    if not os.path.isdir(PROJECTS_ROOT):
+        return
+    for name in os.listdir(PROJECTS_ROOT):
+        path = os.path.join(PROJECTS_ROOT, name)
+        if os.path.isdir(path):
+            yield name, path
+
+
+def _format_cwd(cwd, project_dir):
+    """Short display form for a session's working directory.
+
+    Prefers the cwd captured from the session's events (unambiguous);
+    falls back to the bucket basename (lossy — `-` could be either a
+    real `-` or a `/` separator)."""
+    if cwd:
+        home = _project_owner_home
+        if cwd == home:
+            return "~"
+        if cwd.startswith(home + "/"):
+            return "~/" + cwd[len(home) + 1:]
+        return cwd
+    if project_dir:
+        return project_dir
+    return ""
 # Hardlink backups created by export_sessions.py / `task_runner.py --backup`.
 # When a session file is vacuumed from SESSIONS_DIR, the hardlink here keeps
 # the data alive and lets us still show / view the session.
@@ -374,7 +409,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     first_user_msg TEXT,
     file_size INTEGER,
     deleted INTEGER DEFAULT 0,
-    backup_path TEXT
+    backup_path TEXT,
+    project_dir TEXT,
+    cwd TEXT
 );
 """
 
@@ -385,12 +422,17 @@ def get_db():
     db.executescript(SESSIONS_TABLE_SCHEMA)
     # Migration: add backup_path to pre-existing sessions tables.
     cols = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
-    if "backup_path" not in cols:
-        try:
-            db.execute("ALTER TABLE sessions ADD COLUMN backup_path TEXT")
-            db.commit()
-        except sqlite3.OperationalError:
-            pass  # read-only DB
+    for col, ddl in (
+        ("backup_path", "ALTER TABLE sessions ADD COLUMN backup_path TEXT"),
+        ("project_dir", "ALTER TABLE sessions ADD COLUMN project_dir TEXT"),
+        ("cwd", "ALTER TABLE sessions ADD COLUMN cwd TEXT"),
+    ):
+        if col not in cols:
+            try:
+                db.execute(ddl)
+                db.commit()
+            except sqlite3.OperationalError:
+                pass  # read-only DB
     return db
 
 
@@ -463,6 +505,7 @@ def get_session_info(path):
     assistant_msg_count = 0
 
     custom_title = None
+    cwd = None
 
     try:
         with open(path) as f:
@@ -482,6 +525,11 @@ def get_session_info(path):
                     if first_ts is None:
                         first_ts = ts
                     last_ts = ts
+
+                if cwd is None:
+                    ev_cwd = event.get("cwd")
+                    if isinstance(ev_cwd, str) and ev_cwd:
+                        cwd = ev_cwd
 
                 etype = event.get("type")
                 if etype == "custom-title":
@@ -519,6 +567,7 @@ def get_session_info(path):
         "event_count": event_count,
         "user_msg_count": user_msg_count,
         "custom_title": custom_title,
+        "cwd": cwd,
         "size": os.path.getsize(path),
     }
 
@@ -526,11 +575,14 @@ def get_session_info(path):
 def scan_sessions(db):
     """Scan session files and update the sessions cache table.
 
-    Only re-parses files whose mtime has changed. Preserves display_name
-    on re-scan. Marks sessions whose files no longer exist as deleted.
-    Silently skips cache updates if the database is read-only.
+    Walks every bucket under PROJECTS_ROOT (Claude Code shards sessions
+    by cwd), so sessions started outside ~/ also appear. Only re-parses
+    files whose mtime has changed AND whose recorded bucket matches.
+    Preserves display_name on re-scan. Marks sessions whose files no
+    longer exist (in any bucket) as deleted. Silently skips cache
+    updates if the database is read-only.
     """
-    if not os.path.isdir(SESSIONS_DIR):
+    if not os.path.isdir(PROJECTS_ROOT):
         return
 
     # Check if database is writable (may be read-only for other users)
@@ -542,49 +594,65 @@ def scan_sessions(db):
 
     task_ids = get_task_session_ids()
 
-    # Get current cached mtimes and display_names
+    # Get current cached mtimes, display_names, and recorded buckets
     cached = {}
-    for row in db.execute("SELECT session_id, file_mtime, display_name FROM sessions"):
-        cached[row[0]] = {"mtime": row[1], "display_name": row[2]}
+    for row in db.execute(
+        "SELECT session_id, file_mtime, display_name, project_dir FROM sessions"
+    ):
+        cached[row[0]] = {
+            "mtime": row[1],
+            "display_name": row[2],
+            "project_dir": row[3],
+        }
 
-    # Scan all jsonl files on disk
+    # Scan all jsonl files across every bucket
     disk_sids = set()
-    for f in os.listdir(SESSIONS_DIR):
-        if not f.endswith(".jsonl"):
-            continue
-        sid = f.replace(".jsonl", "")
-        disk_sids.add(sid)
-        path = os.path.join(SESSIONS_DIR, f)
-
+    for bucket_name, bucket_path in _list_session_buckets():
         try:
-            mtime = os.path.getmtime(path)
+            entries = os.listdir(bucket_path)
         except OSError:
             continue
+        for f in entries:
+            if not f.endswith(".jsonl"):
+                continue
+            sid = f.replace(".jsonl", "")
+            disk_sids.add(sid)
+            path = os.path.join(bucket_path, f)
 
-        # Skip if mtime hasn't changed
-        if sid in cached and cached[sid]["mtime"] == mtime:
-            # Un-delete if file reappeared
-            db.execute("UPDATE sessions SET deleted = 0 WHERE session_id = ? AND deleted = 1", (sid,))
-            continue
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
 
-        # Parse the file
-        info = get_session_info(path)
-        is_task = 1 if is_task_session(path, task_ids) else 0
-        has_msgs = 1 if info["user_msg_count"] > 0 else 0
+            # Skip if mtime hasn't changed AND we already recorded this
+            # bucket. The bucket check catches sessions that moved between
+            # buckets without their mtime changing (rare but possible).
+            if (
+                sid in cached
+                and cached[sid]["mtime"] == mtime
+                and cached[sid].get("project_dir") == bucket_name
+            ):
+                db.execute("UPDATE sessions SET deleted = 0 WHERE session_id = ? AND deleted = 1", (sid,))
+                continue
 
-        # Preserve display_name on re-scan
-        display_name = cached[sid]["display_name"] if sid in cached else None
+            # Parse the file
+            info = get_session_info(path)
+            is_task = 1 if is_task_session(path, task_ids) else 0
+            has_msgs = 1 if info["user_msg_count"] > 0 else 0
 
-        db.execute("""
-            INSERT OR REPLACE INTO sessions
-                (session_id, file_mtime, is_task, has_messages, custom_title,
-                 display_name, first_ts, last_ts, user_msg_count, first_user_msg,
-                 file_size, deleted)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-        """, (sid, mtime, is_task, has_msgs, info["custom_title"],
-              display_name, info["first_ts"], info["last_ts"],
-              info["user_msg_count"], info["first_user_msg"],
-              info["size"]))
+            # Preserve display_name on re-scan
+            display_name = cached[sid]["display_name"] if sid in cached else None
+
+            db.execute("""
+                INSERT OR REPLACE INTO sessions
+                    (session_id, file_mtime, is_task, has_messages, custom_title,
+                     display_name, first_ts, last_ts, user_msg_count, first_user_msg,
+                     file_size, deleted, project_dir, cwd)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            """, (sid, mtime, is_task, has_msgs, info["custom_title"],
+                  display_name, info["first_ts"], info["last_ts"],
+                  info["user_msg_count"], info["first_user_msg"],
+                  info["size"], bucket_name, info["cwd"]))
 
     # Sessions whose live files are gone: keep them visible if a backup
     # hardlink under BACKUP_SESSIONS_DIR survived (export_sessions.py's
@@ -604,10 +672,10 @@ def scan_sessions(db):
     db.commit()
 
 
-def list_sessions(show_deleted=False):
+def list_sessions(show_deleted=False, show_cwd=False):
     """List interactive (non-task) sessions from the cache."""
-    if not os.path.isdir(SESSIONS_DIR):
-        print(f"Sessions directory not found: {SESSIONS_DIR}", file=sys.stderr)
+    if not os.path.isdir(PROJECTS_ROOT):
+        print(f"Projects root not found: {PROJECTS_ROOT}", file=sys.stderr)
         sys.exit(1)
 
     db = get_db()
@@ -615,7 +683,8 @@ def list_sessions(show_deleted=False):
 
     query = """
         SELECT session_id, first_ts, file_size, user_msg_count,
-               display_name, custom_title, first_user_msg, deleted
+               display_name, custom_title, first_user_msg, deleted,
+               project_dir, cwd
         FROM sessions
         WHERE is_task = 0 AND has_messages = 1
     """
@@ -630,9 +699,15 @@ def list_sessions(show_deleted=False):
         print("No interactive sessions found.")
         return
 
-    print(f"{'Date':<18}  {'Size':>6}  {'Msgs':>4}  {'Name':<20}  First message")
-    print(f"{'─' * 18}  {'─' * 6}  {'─' * 4}  {'─' * 20}  {'─' * 40}")
-    for sid, first_ts, file_size, user_msg_count, display_name, custom_title, first_user_msg, deleted in rows:
+    cwd_w = 24
+    if show_cwd:
+        print(f"{'Date':<18}  {'Size':>6}  {'Msgs':>4}  {'Cwd':<{cwd_w}}  {'Name':<20}  First message")
+        print(f"{'─' * 18}  {'─' * 6}  {'─' * 4}  {'─' * cwd_w}  {'─' * 20}  {'─' * 40}")
+    else:
+        print(f"{'Date':<18}  {'Size':>6}  {'Msgs':>4}  {'Name':<20}  First message")
+        print(f"{'─' * 18}  {'─' * 6}  {'─' * 4}  {'─' * 20}  {'─' * 40}")
+    for (sid, first_ts, file_size, user_msg_count, display_name, custom_title,
+         first_user_msg, deleted, project_dir, cwd) in rows:
         ts = first_ts or ""
         if ts:
             try:
@@ -657,7 +732,13 @@ def list_sessions(show_deleted=False):
             preview = preview[:max_preview - 3] + "..."
         preview = preview.replace("\n", " ")
 
-        print(f"{ts:<18}  {size_str:>6}  {user_msg_count:>4}  {name:<20}  {preview}")
+        if show_cwd:
+            cwd_disp = _format_cwd(cwd, project_dir)
+            if len(cwd_disp) > cwd_w:
+                cwd_disp = cwd_disp[:cwd_w - 1] + "…"
+            print(f"{ts:<18}  {size_str:>6}  {user_msg_count:>4}  {cwd_disp:<{cwd_w}}  {name:<20}  {preview}")
+        else:
+            print(f"{ts:<18}  {size_str:>6}  {user_msg_count:>4}  {name:<20}  {preview}")
 
 
 def resolve_session(name):
@@ -667,8 +748,8 @@ def resolve_session(name):
     custom_title (case-insensitive), or session_id prefix.
     Returns the path, or exits with an error.
     """
-    if not os.path.isdir(SESSIONS_DIR):
-        print(f"Sessions directory not found: {SESSIONS_DIR}", file=sys.stderr)
+    if not os.path.isdir(PROJECTS_ROOT):
+        print(f"Projects root not found: {PROJECTS_ROOT}", file=sys.stderr)
         sys.exit(1)
 
     db = get_db()
@@ -676,7 +757,8 @@ def resolve_session(name):
 
     # Query for matches: display_name, custom_title (case-insensitive), or ID prefix
     rows = db.execute("""
-        SELECT session_id, display_name, custom_title, backup_path FROM sessions
+        SELECT session_id, display_name, custom_title, backup_path, project_dir
+        FROM sessions
         WHERE deleted = 0 AND (
             display_name = ? COLLATE NOCASE
             OR custom_title = ? COLLATE NOCASE
@@ -686,8 +768,9 @@ def resolve_session(name):
     db.close()
 
     if len(rows) == 1:
-        sid, _, _, backup_path = rows[0]
-        live = os.path.join(SESSIONS_DIR, sid + ".jsonl")
+        sid, _, _, backup_path, project_dir = rows[0]
+        bucket = project_dir or DEFAULT_BUCKET
+        live = os.path.join(PROJECTS_ROOT, bucket, sid + ".jsonl")
         if os.path.isfile(live):
             return live
         if backup_path and os.path.isfile(backup_path):
@@ -698,7 +781,7 @@ def resolve_session(name):
         sys.exit(1)
     else:
         print(f"Ambiguous session '{name}', matches:", file=sys.stderr)
-        for sid, display_name, custom_title, _ in rows:
+        for sid, display_name, custom_title, _, _ in rows:
             label = display_name or custom_title or sid
             print(f"  {sid}  {label}", file=sys.stderr)
         sys.exit(1)
@@ -706,8 +789,8 @@ def resolve_session(name):
 
 def set_display_name(session_ref, name):
     """Set or clear a display_name for a session."""
-    if not os.path.isdir(SESSIONS_DIR):
-        print(f"Sessions directory not found: {SESSIONS_DIR}", file=sys.stderr)
+    if not os.path.isdir(PROJECTS_ROOT):
+        print(f"Projects root not found: {PROJECTS_ROOT}", file=sys.stderr)
         sys.exit(1)
 
     db = get_db()
@@ -761,6 +844,11 @@ def main():
     parser.add_argument(
         "--deleted", action="store_true",
         help="Include deleted sessions in --list output"
+    )
+    parser.add_argument(
+        "--cwd", action="store_true",
+        help="Include each session's cwd column in --list output "
+             "(useful for distinguishing sessions across project buckets)"
     )
     parser.add_argument(
         "--name", nargs=2, metavar=("SESSION", "NAME"),
@@ -822,7 +910,7 @@ def main():
         return
 
     if args.list:
-        list_sessions(show_deleted=args.deleted)
+        list_sessions(show_deleted=args.deleted, show_cwd=args.cwd)
         return
 
     if not args.file:
