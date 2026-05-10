@@ -475,6 +475,7 @@ Formats Claude Code session `.jsonl` logs for readable terminal output.
 # List interactive sessions (excludes task runner sessions)
 format_session.py --list
 format_session.py --list --deleted      # Include sessions whose files were removed
+format_session.py --list --cwd          # Add a Cwd column tagging each session's project bucket
 
 # View a session by name, custom title, or ID prefix
 format_session.py gnumach               # By custom title (from /rename)
@@ -487,9 +488,21 @@ format_session.py gnumach --tool-output # Show tool results (implies --tools)
 format_session.py gnumach --thinking    # Show thinking blocks
 format_session.py gnumach --all         # Show everything
 
-# Set a display name for a session
+# Set a display name for a session (requires tasks.db)
 format_session.py --name SESSION_REF "my name"
 ```
+
+Claude Code shards session JSONLs by cwd under `~/.claude/projects/`,
+giving each cwd its own `-<encoded-cwd>` subdirectory (e.g.
+`-home-alice` for `/home/alice`). `--list` walks every bucket so
+sessions started outside `~/` still appear; `--list --cwd` adds the
+working directory column to disambiguate them.
+
+`format_session.py` is usable without the task runner — when no
+`tasks.db` is present, the session-metadata cache falls back to an
+in-memory database. Listing and viewing work normally; only
+`--name SESSION NAME` is gated, since the new name has nowhere to
+persist.
 
 ## Database
 
