@@ -37,9 +37,9 @@ from datetime import datetime
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
-from project_dir import PROJECT_DIR, DB_PATH
+from project_dir import PROJECT_DIR, DB_PATH, HOME_BUCKET_DIR
 LOGS_DIR = os.path.join(PROJECT_DIR, 'logs')
-SESSIONS_DIR = os.path.expanduser("~/.claude/projects/-home-claude")
+SESSIONS_DIR = HOME_BUCKET_DIR
 
 # Per million tokens, 5-minute cache rate (verified against official billing)
 PRICING = {
@@ -144,8 +144,8 @@ def scan_session_files():
     """Find all session/log files to index.
 
     Scans three locations:
-    1. Top-level session files: ~/.claude/projects/-home-claude/*.jsonl
-    2. Subagent files: ~/.claude/projects/-home-claude/*/subagents/agent-*.jsonl
+    1. Top-level session files: <home-bucket>/*.jsonl
+    2. Subagent files: <home-bucket>/*/subagents/agent-*.jsonl
     3. Old task runner logs: ~/project/logs/*.log (stream-json from claude --print)
 
     Returns list of file paths.

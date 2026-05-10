@@ -46,7 +46,7 @@ CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
 # Add SCRIPT_DIR to path so we can import project_dir
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
-from project_dir import PROJECT_DIR, DB_PATH
+from project_dir import PROJECT_DIR, DB_PATH, HOME_BUCKET_DIR
 
 LOGS_DIR = os.path.join(PROJECT_DIR, 'logs')
 
@@ -762,9 +762,7 @@ def show_activity(db, limit=20):
         # Chat continuation: show as separate entry if it exists
         if r["chat_session_id"]:
             # Find the last timestamp in the chat session
-            chat_path = os.path.expanduser(
-                f"~/.claude/projects/-home-claude/{r['chat_session_id']}.jsonl"
-            )
+            chat_path = os.path.join(HOME_BUCKET_DIR, f"{r['chat_session_id']}.jsonl")
             if os.path.exists(chat_path):
                 last_ts = None
                 try:
@@ -1172,7 +1170,7 @@ def show_task(db, name, verbosity=0, all_runs=False, timestamps=False):
 
         # New architecture: chat_session_id from --chat, cutoff from subagent log
         if r["chat_session_id"]:
-            p = os.path.expanduser(f"~/.claude/projects/-home-claude/{r['chat_session_id']}.jsonl")
+            p = os.path.join(HOME_BUCKET_DIR, f"{r['chat_session_id']}.jsonl")
             if os.path.exists(p):
                 session_path = p
             # Cutoff: last event in the subagent log
@@ -1199,7 +1197,7 @@ def show_task(db, name, verbosity=0, all_runs=False, timestamps=False):
             if not session_id and r["log_path"]:
                 session_id = extract_session_id(r["log_path"])
             if session_id:
-                p = os.path.expanduser(f"~/.claude/projects/-home-claude/{session_id}.jsonl")
+                p = os.path.join(HOME_BUCKET_DIR, f"{session_id}.jsonl")
                 if os.path.exists(p):
                     session_path = p
             if r["log_path"] and os.path.exists(r["log_path"]):
@@ -2006,9 +2004,7 @@ def chat_task(db, name):
         if not session_id and log_path:
             session_id = extract_session_id(log_path)
         if session_id:
-            session_path = os.path.expanduser(
-                f"~/.claude/projects/-home-claude/{session_id}.jsonl"
-            )
+            session_path = os.path.join(HOME_BUCKET_DIR, f"{session_id}.jsonl")
             if os.path.exists(session_path):
                 print(f"Resuming old session {session_id}")
                 os.chdir(os.path.expanduser("~"))
@@ -2022,9 +2018,7 @@ def chat_task(db, name):
     # If a chat session already exists for this run, resume it
     chat_session_id = run["chat_session_id"]
     if chat_session_id:
-        chat_path = os.path.expanduser(
-            f"~/.claude/projects/-home-claude/{chat_session_id}.jsonl"
-        )
+        chat_path = os.path.join(HOME_BUCKET_DIR, f"{chat_session_id}.jsonl")
         if os.path.exists(chat_path):
             print(f"Resuming existing chat session {chat_session_id}")
             os.chdir(os.path.expanduser("~"))
@@ -2039,9 +2033,7 @@ def chat_task(db, name):
         return False
 
     new_session_id = str(_uuid.uuid4())
-    dst_path = os.path.expanduser(
-        f"~/.claude/projects/-home-claude/{new_session_id}.jsonl"
-    )
+    dst_path = os.path.join(HOME_BUCKET_DIR, f"{new_session_id}.jsonl")
 
     with open(src_path) as f:
         lines = f.readlines()
@@ -2255,7 +2247,7 @@ def complete_task(db, name, agent_output, agent_id=None):
         src = find_subagent_log(effective_agent_id)
         if src:
             # Determine parent session ID from the path:
-            # .../projects/-home-claude/{sessionId}/subagents/agent-{agentId}.jsonl
+            # .../projects/<bucket>/{sessionId}/subagents/agent-{agentId}.jsonl
             parts = src.split("/subagents/")
             if len(parts) == 2:
                 parent_session = os.path.basename(parts[0])
@@ -2815,7 +2807,7 @@ def main():
         snapshots_dir = os.path.join(PROJECT_DIR, "claude-snapshots")
         os.makedirs(snapshots_dir, exist_ok=True)
         snapshot_file = os.path.join(snapshots_dir, datetime.now().strftime("%Y%m%d-%H%M") + ".txt")
-        claude_projects = os.path.expanduser("~/.claude/projects/-home-claude")
+        claude_projects = HOME_BUCKET_DIR
         snapshot = subprocess.run(
             ["find", claude_projects, "-name", "*.jsonl", "-printf", "%T@ %s %p\n"],
             capture_output=True, text=True,
@@ -2860,7 +2852,7 @@ def main():
             if not session_id and run["log_path"]:
                 session_id = extract_session_id(run["log_path"])
             if session_id:
-                p = os.path.expanduser(f"~/.claude/projects/-home-claude/{session_id}.jsonl")
+                p = os.path.join(HOME_BUCKET_DIR, f"{session_id}.jsonl")
                 if os.path.exists(p):
                     paths_to_scan.append(p)
             if run["agent_id"]:
@@ -2868,7 +2860,7 @@ def main():
                 if p:
                     paths_to_scan.append(p)
             if run["chat_session_id"]:
-                p = os.path.expanduser(f"~/.claude/projects/-home-claude/{run['chat_session_id']}.jsonl")
+                p = os.path.join(HOME_BUCKET_DIR, f"{run['chat_session_id']}.jsonl")
                 if os.path.exists(p):
                     paths_to_scan.append(p)
             if not paths_to_scan:

@@ -343,7 +343,7 @@ def render_assistant(content_blocks, width, show_thinking=False, show_tools=Fals
 _script_dir = os.path.dirname(os.path.realpath(__file__))
 if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
-from project_dir import PROJECT_DIR as _PROJECT_DIR, DB_PATH as TASK_DB
+from project_dir import PROJECT_DIR as _PROJECT_DIR, DB_PATH as TASK_DB, cwd_to_bucket
 
 # Derive sessions dir from the project owner's home, not the running user's.
 # This allows other users to view sessions when TASK_RUNNER_PROJECT is set.
@@ -357,7 +357,7 @@ _project_owner_home = os.path.expanduser(
 # sessions appear; SESSIONS_DIR is kept as the default bucket for
 # legacy callers and as the fallback when project_dir isn't recorded.
 PROJECTS_ROOT = os.path.join(_project_owner_home, ".claude", "projects")
-DEFAULT_BUCKET = "-home-claude"
+DEFAULT_BUCKET = cwd_to_bucket(_project_owner_home)
 SESSIONS_DIR = os.path.join(PROJECTS_ROOT, DEFAULT_BUCKET)
 
 

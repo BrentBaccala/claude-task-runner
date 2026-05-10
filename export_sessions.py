@@ -22,9 +22,9 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
-from project_dir import PROJECT_DIR, DB_PATH
+from project_dir import PROJECT_DIR, DB_PATH, HOME_BUCKET_DIR
 CLAUDE_DIR = os.path.expanduser("~/.claude")
-SESSIONS_DIR = os.path.join(CLAUDE_DIR, "projects/-home-claude")
+SESSIONS_DIR = HOME_BUCKET_DIR
 MEMORY_DIR = os.path.join(SESSIONS_DIR, "memory")
 HISTORY_FILE = os.path.join(CLAUDE_DIR, "history.jsonl")
 
@@ -143,7 +143,7 @@ SUBAGENT_EXPORT_DIR = os.path.join(PROJECT_DIR, "sessions", "subagents")
 def export_subagent_logs(dry_run=False):
     """Hardlink subagent log files from .claude into ~/project/sessions/subagents/.
 
-    Scans ~/.claude/projects/-home-claude/*/subagents/ for agent-*.jsonl files
+    Scans <home-bucket>/*/subagents/ for agent-*.jsonl files
     and creates hardlinks preserving the parent session directory structure:
       sessions/subagents/{parent_session_id}/agent-{agent_id}.jsonl
     """

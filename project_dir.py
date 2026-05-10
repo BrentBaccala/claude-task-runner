@@ -35,3 +35,20 @@ def find_project_dir():
 
 PROJECT_DIR = find_project_dir()
 DB_PATH = os.path.join(PROJECT_DIR, 'tasks.db')
+
+
+def cwd_to_bucket(cwd):
+    """Encode an absolute cwd as the Claude Code project-bucket dirname.
+
+    Claude Code creates one subdirectory under ~/.claude/projects/ per
+    cwd a session was started from. The dirname is the absolute cwd
+    with each "/" replaced by "-" — so cwd "/home/alice" maps to bucket
+    "-home-alice". The encoding is lossy (a real "-" in the cwd is
+    indistinguishable from a "/" separator on decode), so this is one-way
+    only; recover the original cwd from a session's events instead."""
+    return cwd.replace("/", "-")
+
+
+CLAUDE_PROJECTS_ROOT = os.path.expanduser("~/.claude/projects")
+HOME_BUCKET = cwd_to_bucket(os.path.expanduser("~"))
+HOME_BUCKET_DIR = os.path.join(CLAUDE_PROJECTS_ROOT, HOME_BUCKET)
