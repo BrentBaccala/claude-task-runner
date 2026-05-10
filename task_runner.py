@@ -568,6 +568,13 @@ def _migrate(db):
         cols = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
         return column in cols
 
+    def has_table(table):
+        result = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table,)
+        ).fetchone()
+        return result is not None
+
     migrations = [
         # (table, column, SQL to add it)
         ("runs", "result_status", "ALTER TABLE runs ADD COLUMN result_status TEXT"),
@@ -589,7 +596,7 @@ def _migrate(db):
 
     applied = 0
     for table, column, sql in migrations:
-        if not has_column(table, column):
+        if has_table(table) and not has_column(table, column):
             db.execute(sql)
             applied += 1
     if applied:

@@ -346,11 +346,18 @@ if _script_dir not in sys.path:
 from project_dir import PROJECT_DIR as _PROJECT_DIR, DB_PATH as TASK_DB, cwd_to_bucket
 
 # Derive sessions dir from the project owner's home, not the running user's.
-# This allows other users to view sessions when TASK_RUNNER_PROJECT is set.
-# (export_sessions.py makes these files world-readable on --backup.)
-_project_owner_home = os.path.expanduser(
-    "~" + pathlib.Path(_PROJECT_DIR).owner()
-)
+# This allows other users to view sessions when TASK_RUNNER_PROJECT is set
+# (export_sessions.py makes those files world-readable on --backup). Falls
+# back to the running user's home when the project dir doesn't exist or its
+# owner can't be resolved — covers the no-task-runner-setup case.
+def _resolve_project_owner_home():
+    try:
+        return os.path.expanduser("~" + pathlib.Path(_PROJECT_DIR).owner())
+    except (OSError, KeyError):
+        return os.path.expanduser("~")
+
+
+_project_owner_home = _resolve_project_owner_home()
 # Claude Code shards session JSONLs by cwd: each cwd gets its own
 # subdirectory under PROJECTS_ROOT, named by replacing each "/" in the
 # absolute cwd with "-". `--list` walks every bucket so cross-cwd
@@ -417,8 +424,16 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 
 def get_db():
-    """Connect to tasks.db and ensure sessions table exists."""
-    db = sqlite3.connect(TASK_DB)
+    """Connect to tasks.db and ensure sessions table exists.
+
+    If tasks.db doesn't exist, falls back to an in-memory database so the
+    viewer still works for users who haven't set up the task runner. The
+    cache then doesn't persist across calls (every --list re-parses every
+    JSONL on disk) but the read paths are otherwise unchanged."""
+    if os.path.isfile(TASK_DB):
+        db = sqlite3.connect(TASK_DB)
+    else:
+        db = sqlite3.connect(":memory:")
     db.executescript(SESSIONS_TABLE_SCHEMA)
     # Migration: add backup_path to pre-existing sessions tables.
     cols = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
@@ -791,6 +806,13 @@ def set_display_name(session_ref, name):
     """Set or clear a display_name for a session."""
     if not os.path.isdir(PROJECTS_ROOT):
         print(f"Projects root not found: {PROJECTS_ROOT}", file=sys.stderr)
+        sys.exit(1)
+    if not os.path.isfile(TASK_DB):
+        print(
+            f"--name requires a task-runner database at {TASK_DB} "
+            "to persist the name. Set TASK_RUNNER_PROJECT or run init_db.py.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     db = get_db()
