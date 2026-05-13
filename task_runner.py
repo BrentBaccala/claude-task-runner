@@ -592,6 +592,7 @@ def _migrate(db):
         ("runs", "agent_id", "ALTER TABLE runs ADD COLUMN agent_id TEXT"),
         ("runs", "chat_session_id", "ALTER TABLE runs ADD COLUMN chat_session_id TEXT"),
         ("inbox", "session_id", "ALTER TABLE inbox ADD COLUMN session_id TEXT"),
+        ("sessions", "is_chat", "ALTER TABLE sessions ADD COLUMN is_chat INTEGER DEFAULT 0"),
     ]
 
     applied = 0
@@ -789,11 +790,12 @@ def show_activity(db, limit=20):
                 if last_ts:
                     events.append((last_ts, "chat", "", f"{'':>7s} {'':>7s}  {'':>10s}  {name} (chat continuation)"))
 
-    # Interactive sessions
+    # Interactive sessions (excluding chat continuations, which are
+    # already emitted as separate "chat" events from the runs loop above)
     sessions = db.execute("""
         SELECT session_id, display_name, first_ts, last_ts, user_msg_count
         FROM sessions
-        WHERE is_task = 0 AND has_messages = 1 AND deleted = 0
+        WHERE is_task = 0 AND is_chat = 0 AND has_messages = 1 AND deleted = 0
         ORDER BY last_ts DESC
     """).fetchall()
 

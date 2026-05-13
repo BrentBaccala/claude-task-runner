@@ -634,11 +634,16 @@ def collect_interactive_sessions(db=None):
         )
     )
 
-    # Get interactive sessions from cache
+    # Get interactive sessions from cache. Chat continuations
+    # (is_chat=1) are excluded here to preserve pre-is_chat behavior
+    # — they were never accounted for in the "interactive" cost bucket
+    # because the prefix heuristic misclassified them as is_task=1.
+    # Whether to surface their cost as a third bucket is a separate
+    # decision (see export_sessions.py's chat handling for the model).
     rows = db.execute("""
         SELECT session_id, custom_title, display_name, first_ts, last_ts
         FROM sessions
-        WHERE is_task = 0 AND has_messages = 1 AND deleted = 0
+        WHERE is_task = 0 AND is_chat = 0 AND has_messages = 1 AND deleted = 0
         ORDER BY first_ts
     """).fetchall()
 

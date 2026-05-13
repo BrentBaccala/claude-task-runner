@@ -138,6 +138,47 @@ def export_memory(dry_run=False):
 
 
 SUBAGENT_EXPORT_DIR = os.path.join(PROJECT_DIR, "sessions", "subagents")
+CHAT_EXPORT_DIR = os.path.join(PROJECT_DIR, "sessions", "chat")
+
+
+def export_chat_sessions(db, dry_run=False):
+    """Hardlink chat continuation JSONLs into ~/project/sessions/chat/.
+
+    `task_runner.py --chat` creates these by copying a subagent log to
+    a new UUID under ~/.claude/projects/-home-claude/ and resuming via
+    `claude --resume`. Claude Code's session GC eventually removes the
+    live file; this pass preserves a hardlink so the chat conversation
+    survives.
+
+    Filename is `<task-name>-<chat-uuid-prefix>.jsonl` — descriptive
+    enough to identify by task at a glance, with the UUID prefix to
+    disambiguate multiple chats per task.
+    """
+    rows = db.execute("""
+        SELECT DISTINCT r.chat_session_id, t.name
+        FROM runs r JOIN tasks t ON r.task_id = t.id
+        WHERE r.chat_session_id IS NOT NULL
+    """).fetchall()
+
+    created = 0
+    for chat_uuid, task_name in rows:
+        live = os.path.join(SESSIONS_DIR, f"{chat_uuid}.jsonl")
+        if not os.path.isfile(live):
+            continue  # already GC'd or never written
+        os.makedirs(CHAT_EXPORT_DIR, exist_ok=True)
+        fname = f"{safe_filename(task_name)}-{chat_uuid[:8]}.jsonl"
+        dest = os.path.join(CHAT_EXPORT_DIR, fname)
+        if os.path.exists(dest):
+            if os.path.samefile(live, dest):
+                continue
+            if not dry_run:
+                os.unlink(dest)
+        action = "WOULD link" if dry_run else "link"
+        print(f"  {action} chat/{fname}")
+        if not dry_run:
+            os.link(live, dest)
+        created += 1
+    return created
 
 
 def export_subagent_logs(dry_run=False):
@@ -196,11 +237,12 @@ def main():
     from format_session import scan_sessions
     scan_sessions(db)
 
-    # Get all non-task sessions with messages
+    # Get all interactive sessions with messages. Chat continuations
+    # (is_chat=1) are handled by export_chat_sessions() below.
     sessions = db.execute("""
         SELECT session_id, display_name, custom_title, is_task, first_user_msg
         FROM sessions
-        WHERE has_messages = 1 AND is_task = 0 AND deleted = 0
+        WHERE has_messages = 1 AND is_task = 0 AND is_chat = 0 AND deleted = 0
         ORDER BY first_ts
     """).fetchall()
 
@@ -306,6 +348,9 @@ def main():
             os.link(src, dest)
         created += 1
 
+    # Export chat continuations before committing/closing — needs db.
+    chat_created = export_chat_sessions(db, dry_run)
+
     if not dry_run:
         db.commit()
     db.close()
@@ -317,6 +362,8 @@ def main():
 
     print()
     print(f"  {created} sessions linked, {skipped} skipped, {updated_names} names updated")
+    if chat_created:
+        print(f"  {chat_created} chat continuations linked")
     if subagent_created:
         print(f"  {subagent_created} subagent logs linked")
     if memory_created:

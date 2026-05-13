@@ -407,6 +407,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     file_mtime REAL,
     is_task INTEGER DEFAULT 0,
+    is_chat INTEGER DEFAULT 0,
     has_messages INTEGER DEFAULT 0,
     custom_title TEXT,
     display_name TEXT,
@@ -474,13 +475,43 @@ def find_backup_path(display_name):
 
 
 def get_task_session_ids():
-    """Get session IDs known to be task runner sessions from the DB."""
+    """Get session IDs known to be old-architecture task runner sessions.
+
+    Only returns runs.session_id, which is set by the pre-Agent-tool
+    `claude --print` architecture (top-level JSONL per task). New-arch
+    tasks (agent_id set, session_id NULL) record to subagent JSONLs
+    under `<bucket>/<parent>/subagents/`, never as top-level files, so
+    scan_sessions never encounters them — no need to include agent_id
+    here. Chat continuations from `task_runner.py --chat` are handled
+    separately by `get_chat_session_ids` (they're their own category).
+    """
     if not os.path.exists(TASK_DB):
         return set()
     db = sqlite3.connect(TASK_DB)
     ids = set(
         r[0] for r in db.execute(
             "SELECT DISTINCT session_id FROM runs WHERE session_id IS NOT NULL"
+        )
+    )
+    db.close()
+    return ids
+
+
+def get_chat_session_ids():
+    """Get session IDs that are chat continuations from `task_runner.py --chat`.
+
+    These are top-level JSONLs created by copying a subagent log and
+    resuming via `claude --resume`. They start with the task prompt
+    (so the prefix heuristic in `is_task_session` would misclassify
+    them as tasks), but they belong to their own category: not a task
+    run, but not a freestanding interactive session either.
+    """
+    if not os.path.exists(TASK_DB):
+        return set()
+    db = sqlite3.connect(TASK_DB)
+    ids = set(
+        r[0] for r in db.execute(
+            "SELECT DISTINCT chat_session_id FROM runs WHERE chat_session_id IS NOT NULL"
         )
     )
     db.close()
@@ -608,6 +639,7 @@ def scan_sessions(db):
         return  # read-only — skip cache update, use existing data
 
     task_ids = get_task_session_ids()
+    chat_ids = get_chat_session_ids()
 
     # Get current cached mtimes, display_names, and recorded buckets
     cached = {}
@@ -650,9 +682,18 @@ def scan_sessions(db):
                 db.execute("UPDATE sessions SET deleted = 0 WHERE session_id = ? AND deleted = 1", (sid,))
                 continue
 
-            # Parse the file
+            # Parse the file. Classification is three-way:
+            #   chat-id match -> is_chat=1 (its own category — preserved
+            #                    by export_sessions, hidden from --list)
+            #   else, task-id or prefix match -> is_task=1
+            #   else -> interactive (is_task=0, is_chat=0)
             info = get_session_info(path)
-            is_task = 1 if is_task_session(path, task_ids) else 0
+            if sid in chat_ids:
+                is_task, is_chat = 0, 1
+            elif is_task_session(path, task_ids):
+                is_task, is_chat = 1, 0
+            else:
+                is_task, is_chat = 0, 0
             has_msgs = 1 if info["user_msg_count"] > 0 else 0
 
             # Preserve display_name on re-scan
@@ -660,11 +701,12 @@ def scan_sessions(db):
 
             db.execute("""
                 INSERT OR REPLACE INTO sessions
-                    (session_id, file_mtime, is_task, has_messages, custom_title,
-                     display_name, first_ts, last_ts, user_msg_count, first_user_msg,
-                     file_size, deleted, project_dir, cwd)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-            """, (sid, mtime, is_task, has_msgs, info["custom_title"],
+                    (session_id, file_mtime, is_task, is_chat, has_messages,
+                     custom_title, display_name, first_ts, last_ts,
+                     user_msg_count, first_user_msg, file_size, deleted,
+                     project_dir, cwd)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            """, (sid, mtime, is_task, is_chat, has_msgs, info["custom_title"],
                   display_name, info["first_ts"], info["last_ts"],
                   info["user_msg_count"], info["first_user_msg"],
                   info["size"], bucket_name, info["cwd"]))
@@ -684,6 +726,17 @@ def scan_sessions(db):
         else:
             db.execute("UPDATE sessions SET deleted = 1 WHERE session_id = ?", (sid,))
 
+    # Idempotent reclassification: mtime-cached rows weren't re-run
+    # through the per-file classifier above, so chat-continuation IDs
+    # that were misclassified is_task=1 (via the prefix heuristic in
+    # earlier versions) get corrected here on every scan.
+    db.execute("""
+        UPDATE sessions SET is_chat = 1, is_task = 0
+        WHERE session_id IN (
+            SELECT chat_session_id FROM runs WHERE chat_session_id IS NOT NULL
+        ) AND (is_chat = 0 OR is_task = 1)
+    """)
+
     db.commit()
 
 
@@ -701,7 +754,7 @@ def list_sessions(show_deleted=False, show_cwd=False):
                display_name, custom_title, first_user_msg, deleted,
                project_dir, cwd
         FROM sessions
-        WHERE is_task = 0 AND has_messages = 1
+        WHERE is_task = 0 AND is_chat = 0 AND has_messages = 1
     """
     if not show_deleted:
         query += " AND deleted = 0"

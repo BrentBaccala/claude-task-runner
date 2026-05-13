@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     file_mtime REAL,
     is_task INTEGER DEFAULT 0,
+    is_chat INTEGER DEFAULT 0,
     has_messages INTEGER DEFAULT 0,
     custom_title TEXT,
     display_name TEXT,
