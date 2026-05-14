@@ -2555,7 +2555,7 @@ def main():
     parser.add_argument("--prompt", metavar="TEXT", dest="continue_prompt",
                         help="Custom prompt for --continue (default: 'Continue where you left off.')")
     parser.add_argument("--create", metavar="NAME", nargs="?", const="--help", help="Create a new task")
-    parser.add_argument("--agent", metavar="TYPE", help="Agent type for --create (default: opus)")
+    parser.add_argument("--agent", metavar="TYPE", help="Agent type (default: opus). For --create or --set")
     parser.add_argument("--description", metavar="DESC", dest="task_description", help="Description for --create")
     parser.add_argument("--depends", metavar="DEP", help="Comma-separated dependency task names for --create or --set")
     parser.add_argument("--max-turns", metavar="N", help="Max turns (0 = unlimited, 'default' = reset). For --create or --set")
@@ -3121,6 +3121,11 @@ def main():
                         sys.exit(1)
                 updates.append("dependencies = ?")
                 params.append(json.dumps(dep_names))
+            if args.agent is not None:
+                if args.agent not in AGENT_MODELS:
+                    print(f"Warning: agent type '{args.agent}' is not in AGENT_MODELS; will default to opus model with no turn/timeout limits.")
+                updates.append("agent_type = ?")
+                params.append(args.agent)
             if not updates:
                 # Check for common mistakes and suggest the right command
                 remaining = sys.argv[sys.argv.index("--set") + 2:]
@@ -3130,7 +3135,7 @@ def main():
                         cmd = arg.lstrip("-")
                         hint = f"\nDid you mean: task_runner.py --{cmd} {name}"
                         break
-                print(f"Nothing to update. Use --max-turns, --timeout, --priority, --depends, etc.{hint}")
+                print(f"Nothing to update. Use --max-turns, --timeout, --priority, --depends, --agent, etc.{hint}")
             else:
                 params.append(name)
                 db.execute(f"UPDATE tasks SET {', '.join(updates)} WHERE name = ?", params)
