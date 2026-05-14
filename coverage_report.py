@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -103,6 +104,39 @@ def build_agent_to_parent_map() -> dict[str, str]:
             aid = f.stem.removeprefix("agent-")
             m[aid] = parent
     return m
+
+
+def build_canonical_to_filenames(filenames: set[str]) -> dict[str, set[str]]:
+    """Reverse map {canonical_sessionId: {filename_uuids that resolve here}}."""
+    out: dict[str, set[str]] = defaultdict(set)
+    for f in filenames:
+        out[canonical_session_id(f)].add(f)
+    return out
+
+
+def probe_task_writes(task_id: int, candidate_uuids: set[str],
+                      task_runner_bin: str = "task_runner.py") -> set[str]:
+    """Run `task_runner.py --show <id> -v` and return the candidate UUIDs
+    found in the verbose output.
+
+    The verbose output includes per-tool tool-use records like
+        ● Write(file_path: "/.../session-<UUID>.md")
+        ● Bash(command: "touch -d @... /.../session-<UUID>.md")
+        ● Bash(command: "git add compactions/session-<UUID>.md ...")
+    Any of those substring-matches the UUID, so a literal `in` test is
+    enough — we don't need to parse tool-call structure.
+    """
+    if not candidate_uuids:
+        return set()
+    try:
+        res = subprocess.run(
+            [task_runner_bin, "--show", str(task_id), "-v"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return set()
+    text = res.stdout + res.stderr
+    return {u for u in candidate_uuids if u in text}
 
 
 def build_artifact_sets(dirs: list[Path], pattern: str) -> tuple[set[str], set[str]]:
@@ -229,6 +263,11 @@ def main():
                          "(e.g. completed, failed, hold, pending)")
     ap.add_argument("--json", dest="as_json", action="store_true",
                     help="emit JSON instead of a table")
+    ap.add_argument("--no-probe-shared", action="store_true",
+                    help="don't probe `task_runner.py --show -v` to upgrade "
+                         "shared verdicts to ok when the verbose run trace "
+                         "shows the task wrote one of its parent's artifact "
+                         "files (probe runs ~0.1s per shared task)")
     args = ap.parse_args()
 
     conn = sqlite3.connect(DB_PATH)
@@ -237,6 +276,8 @@ def main():
     agent_to_parent = build_agent_to_parent_map()
     comp_filenames, comp_canonical = build_compaction_sets()
     kg_filenames, kg_canonical = build_kg_sets()
+    comp_canon_to_files = build_canonical_to_filenames(comp_filenames)
+    kg_canon_to_files = build_canonical_to_filenames(kg_filenames)
     runs_by_task = load_task_runs(conn)
 
     tasks_q = "SELECT id, name, status FROM tasks ORDER BY id"
@@ -248,6 +289,23 @@ def main():
         cov = coverage_for_task(runs, agent_to_parent,
                                 comp_filenames, comp_canonical,
                                 kg_filenames,   kg_canonical)
+
+        # Probe shared verdicts: if the task's verbose --show output
+        # mentions any of its parent's artifact filenames, upgrade to ok.
+        if not args.no_probe_shared:
+            if cov["compaction"] == "shared":
+                candidates: set[str] = set()
+                for p in cov["parents"]:
+                    candidates |= comp_canon_to_files.get(p, set())
+                if probe_task_writes(t["id"], candidates):
+                    cov["compaction"] = "ok"
+            if cov["kg"] == "shared":
+                candidates = set()
+                for p in cov["parents"]:
+                    candidates |= kg_canon_to_files.get(p, set())
+                if probe_task_writes(t["id"], candidates):
+                    cov["kg"] = "ok"
+
         rows.append({
             "task_id":    t["id"],
             "name":       t["name"],
@@ -284,7 +342,8 @@ def main():
           f"shared={by_state[('kg','shared')]:4d}  "
           f"missing={by_state[('kg','missing')]:4d}  "
           f"unmappable={by_state[('kg','unmappable')]:4d}")
-    print("  ok     = direct attribution (run.chat_session_id matches an artifact filename)")
+    print("  ok     = direct attribution (chat_session_id match, or --show -v "
+          "tool-trace shows the task wrote the file)")
     print("  shared = parent session has the artifact, but no per-task attribution")
     print(f"  parent sessions known: "
           f"{sum(1 for r in rows if r['parents'])} / {total}")
