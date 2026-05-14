@@ -105,49 +105,52 @@ def build_agent_to_parent_map() -> dict[str, str]:
     return m
 
 
-def build_compaction_set() -> set[str]:
-    """Set of canonical sessionIds covered by a compaction file.
+def build_artifact_sets(dirs: list[Path], pattern: str) -> tuple[set[str], set[str]]:
+    """Return (filename_uuids, canonical_session_ids) for artifact files.
 
-    Each filename UUID is dereferenced via the matching JSONL's first
-    event so `--chat`-forked compactions match their original parent.
+    filename_uuids are the literal UUIDs from the filenames — used for
+    direct per-run attribution via runs.chat_session_id (a chat-resumed
+    session writes session-<chat_session_id>.<ext>).
+
+    canonical_session_ids are the dereferenced sessionIds from each
+    file's matching JSONL — used for parent-shared coverage (a session
+    that orchestrated tasks may have a single compaction covering all
+    of them).
     """
-    if not COMPACTIONS_DIR.is_dir():
-        return set()
-    out = set()
-    for f in COMPACTIONS_DIR.glob("session-*.md"):
-        file_uuid = f.stem.removeprefix("session-")
-        out.add(canonical_session_id(file_uuid))
-    return out
-
-
-def build_kg_set() -> set[str]:
-    """Set of canonical sessionIds covered by a KG-entry file.
-
-    Same fork-dereference treatment as compactions.
-    """
-    out = set()
-    for d in LIGHTRAG_DIRS:
+    filenames: set[str] = set()
+    canonical: set[str] = set()
+    for d in dirs:
         if not d.is_dir():
             continue
-        for f in d.glob("session-*.json"):
+        for f in d.glob(pattern):
             file_uuid = f.stem.removeprefix("session-")
-            out.add(canonical_session_id(file_uuid))
-    return out
+            filenames.add(file_uuid)
+            canonical.add(canonical_session_id(file_uuid))
+    return filenames, canonical
+
+
+def build_compaction_sets() -> tuple[set[str], set[str]]:
+    return build_artifact_sets([COMPACTIONS_DIR], "session-*.md")
+
+
+def build_kg_sets() -> tuple[set[str], set[str]]:
+    return build_artifact_sets(LIGHTRAG_DIRS, "session-*.json")
 
 
 def load_task_runs(conn) -> dict[int, list[dict]]:
-    """task_id -> [{agent_id, session_id, success, started_at}, ...]."""
+    """task_id -> [{agent_id, session_id, chat_session_id, success, started_at}, ...]."""
     out: dict[int, list[dict]] = defaultdict(list)
     cur = conn.execute(
-        "SELECT task_id, agent_id, session_id, success, started_at "
+        "SELECT task_id, agent_id, session_id, chat_session_id, success, started_at "
         "FROM runs ORDER BY started_at"
     )
-    for task_id, agent_id, session_id, success, started_at in cur:
+    for task_id, agent_id, session_id, chat_session_id, success, started_at in cur:
         out[task_id].append({
-            "agent_id":   agent_id,
-            "session_id": session_id,
-            "success":    success,
-            "started_at": started_at,
+            "agent_id":        agent_id,
+            "session_id":      session_id,
+            "chat_session_id": chat_session_id,
+            "success":         success,
+            "started_at":      started_at,
         })
     return out
 
@@ -155,18 +158,31 @@ def load_task_runs(conn) -> dict[int, list[dict]]:
 def coverage_for_task(
     runs: list[dict],
     agent_to_parent: dict[str, str],
-    compactions: set[str],
-    kg_entries: set[str],
+    comp_filenames: set[str], comp_canonical: set[str],
+    kg_filenames: set[str],   kg_canonical: set[str],
 ) -> dict:
     """Compute coverage for one task's runs.
 
-    Two paths to the parent session UUID, depending on era:
-      - older runs: runs.session_id IS the parent session UUID directly
-      - newer runs: runs.agent_id, looked up via subagents/<parent>/agent-<id>
-    The two columns are mutually exclusive in practice.
+    Two coverage tiers per artifact:
+      direct  — a run's chat_session_id matches an artifact filename
+                (definitively this run wrote it via end2/--chat-resume)
+      shared  — a parent session has the artifact (could have been
+                written by the orchestrator or any sibling subagent;
+                no per-task attribution)
+
+    Parent UUID resolution: older runs have runs.session_id set to the
+    parent UUID directly; newer runs have runs.agent_id looked up via
+    subagents/<parent>/agent-<id>.jsonl. Mutually exclusive in practice.
     """
     parents = []
+    direct_comp = direct_kg = False
     for r in runs:
+        csid = r.get("chat_session_id")
+        if csid and csid in comp_filenames:
+            direct_comp = True
+        if csid and csid in kg_filenames:
+            direct_kg = True
+
         sid = r.get("session_id")
         if sid:
             if sid not in parents:
@@ -179,12 +195,23 @@ def coverage_for_task(
                 parents.append(p)
 
     if not runs:
-        comp = kg = "unmappable"  # no runs at all
+        comp = kg = "unmappable"
     elif not parents:
-        comp = kg = "unmappable"  # runs exist but no parent UUID resolvable
+        comp = "ok" if direct_comp else "unmappable"
+        kg = "ok" if direct_kg else "unmappable"
     else:
-        comp = "ok" if any(p in compactions for p in parents) else "missing"
-        kg = "ok" if any(p in kg_entries for p in parents) else "missing"
+        if direct_comp:
+            comp = "ok"
+        elif any(p in comp_canonical for p in parents):
+            comp = "shared"
+        else:
+            comp = "missing"
+        if direct_kg:
+            kg = "ok"
+        elif any(p in kg_canonical for p in parents):
+            kg = "shared"
+        else:
+            kg = "missing"
 
     return {"parents": parents, "compaction": comp, "kg": kg}
 
@@ -208,8 +235,8 @@ def main():
     conn.row_factory = sqlite3.Row
 
     agent_to_parent = build_agent_to_parent_map()
-    compactions = build_compaction_set()
-    kg_entries = build_kg_set()
+    comp_filenames, comp_canonical = build_compaction_sets()
+    kg_filenames, kg_canonical = build_kg_sets()
     runs_by_task = load_task_runs(conn)
 
     tasks_q = "SELECT id, name, status FROM tasks ORDER BY id"
@@ -218,7 +245,9 @@ def main():
         if args.task_status and t["status"] != args.task_status:
             continue
         runs = runs_by_task.get(t["id"], [])
-        cov = coverage_for_task(runs, agent_to_parent, compactions, kg_entries)
+        cov = coverage_for_task(runs, agent_to_parent,
+                                comp_filenames, comp_canonical,
+                                kg_filenames,   kg_canonical)
         rows.append({
             "task_id":    t["id"],
             "name":       t["name"],
@@ -248,26 +277,30 @@ def main():
         by_state[("kg",   r["kg"])]         += 1
     print(f"Tasks shown: {total}")
     print(f"  compaction: ok={by_state[('comp','ok')]:4d}  "
+          f"shared={by_state[('comp','shared')]:4d}  "
           f"missing={by_state[('comp','missing')]:4d}  "
           f"unmappable={by_state[('comp','unmappable')]:4d}")
     print(f"  KG entry  : ok={by_state[('kg','ok')]:4d}  "
+          f"shared={by_state[('kg','shared')]:4d}  "
           f"missing={by_state[('kg','missing')]:4d}  "
           f"unmappable={by_state[('kg','unmappable')]:4d}")
+    print("  ok     = direct attribution (run.chat_session_id matches an artifact filename)")
+    print("  shared = parent session has the artifact, but no per-task attribution")
     print(f"  parent sessions known: "
           f"{sum(1 for r in rows if r['parents'])} / {total}")
     print()
 
     # Table: id | status | C | K | n_runs | parent (first) | name
-    header = f"{'ID':>4} {'STATUS':<8} {'C':<3} {'K':<3} {'RUNS':>4} {'PARENT':<10} NAME"
+    header = f"{'ID':>4} {'STATUS':<8} {'C':<4} {'K':<4} {'RUNS':>4} {'PARENT':<10} NAME"
     print(header)
     print("-" * len(header))
-    sym = {"ok": "ok", "missing": "-", "unmappable": "?"}
+    sym = {"ok": "ok", "shared": "~", "missing": "-", "unmappable": "?"}
     for r in rows:
         parent = r["parents"][0][:8] if r["parents"] else ""
         if len(r["parents"]) > 1:
             parent += f"+{len(r['parents'])-1}"
         print(f"{r['task_id']:>4} {(r['status'] or ''):<8.8} "
-              f"{sym[r['compaction']]:<3} {sym[r['kg']]:<3} "
+              f"{sym[r['compaction']]:<4} {sym[r['kg']]:<4} "
               f"{r['n_runs']:>4} {parent:<10} {r['name']}")
 
 
