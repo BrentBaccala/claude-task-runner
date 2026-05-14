@@ -95,6 +95,7 @@ task_runner.py --set NAME --timeout 0              # unlimited timeout
 task_runner.py --set NAME --timeout default        # reset to agent-type default
 task_runner.py --set NAME --priority 20            # higher runs first
 task_runner.py --set NAME --depends dep1,dep2      # set dependencies
+task_runner.py --set NAME --agent sonnet           # change agent type
 # NOTE: --set does NOT change status. Use --reset, --hold, --unhold, --kill instead.
 
 # Committing
@@ -189,11 +190,11 @@ column) for each run, so you have a history even if the prompt file changes.
 
 ```bash
 # Basic
-task_runner.py --create my-task --agent tester \
+task_runner.py --create my-task \
   --description "Run the test suite"
 
 # With dependencies (won't run until deps complete)
-task_runner.py --create run-tests --agent tester \
+task_runner.py --create run-tests \
   --depends build-project
 ```
 
@@ -201,11 +202,11 @@ For iterative test/fix chains, create two tasks:
 
 ```bash
 # Test task: on failure, activates the fix task
-task_runner.py --create my-test --agent tester \
+task_runner.py --create my-test \
   --on-partial-failure my-fix --iterate-limit 5
 
 # Fix task: on success, re-runs the test task
-task_runner.py --create my-fix --agent coder \
+task_runner.py --create my-fix \
   --rerun-after my-test --hold-on-create
 ```
 
@@ -388,7 +389,7 @@ them"), while the injected context tells it what specifically failed this time.
 Tasks can depend on other tasks:
 
 ```bash
-task_runner.py --create run-tests --agent tester --depends build-it
+task_runner.py --create run-tests --depends build-it
 ```
 
 - A task won't run until all its dependencies have status `completed`
