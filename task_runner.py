@@ -519,6 +519,108 @@ def extract_session_id(log_path):
     return session_id
 
 
+def stream_json_to_session_jsonl(log_path, dst_path, initial_prompt):
+    """Convert a `claude --print` stream-json log into a resumable session JSONL.
+
+    The stream-json format (what claude --print emits, stored in
+    ~/project/logs/<task>-<run>.log) carries user/assistant events but
+    lacks the metadata that `claude --resume` needs (parentUuid chain,
+    cwd, gitBranch, userType, version, isSidechain, entrypoint) and
+    doesn't capture the initial prompt as a user event.
+
+    This rebuilds a session JSONL by:
+      - pulling cwd/version/permissionMode from the leading init event
+      - synthesizing a first user event from `initial_prompt`
+      - filtering to user/assistant events and backfilling metadata
+      - chaining parentUuid through the events in file order
+
+    The original session_id is preserved in each event's sessionId field
+    (cost_report dedupes against the filename's UUID, so history copied
+    in this way isn't double-counted).
+
+    Returns the session UUID written to dst_path's basename (caller
+    derives that), or None on failure.
+    """
+    import uuid as _uuid
+
+    if not log_path or not os.path.exists(log_path):
+        return False
+
+    events = []
+    with open(log_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    init = next(
+        (e for e in events if e.get("type") == "system" and e.get("subtype") == "init"),
+        {},
+    )
+    cwd = init.get("cwd", os.path.expanduser("~"))
+    version = init.get("claude_code_version", "")
+    permission_mode = init.get("permissionMode", "bypassPermissions")
+    orig_session_id = init.get("session_id") or ""
+    first_ts = init.get("timestamp") or (events[0].get("timestamp") if events else "")
+
+    out = []
+    prev_uuid = None
+
+    if initial_prompt:
+        prompt_uuid = str(_uuid.uuid4())
+        out.append({
+            "parentUuid": None,
+            "isSidechain": False,
+            "type": "user",
+            "message": {"role": "user", "content": initial_prompt},
+            "uuid": prompt_uuid,
+            "timestamp": first_ts,
+            "sessionId": orig_session_id,
+            "userType": "external",
+            "cwd": cwd,
+            "version": version,
+            "gitBranch": "",
+            "entrypoint": "cli",
+            "permissionMode": permission_mode,
+            "promptId": str(_uuid.uuid4()),
+        })
+        prev_uuid = prompt_uuid
+
+    for e in events:
+        t = e.get("type")
+        if t not in ("user", "assistant"):
+            continue
+        new_ev = {
+            "parentUuid": prev_uuid,
+            "isSidechain": False,
+            "type": t,
+            "message": e.get("message", {}),
+            "uuid": e.get("uuid") or str(_uuid.uuid4()),
+            "timestamp": e.get("timestamp", ""),
+            "sessionId": orig_session_id,
+            "userType": "external",
+            "cwd": cwd,
+            "version": version,
+            "gitBranch": "",
+            "entrypoint": "cli",
+        }
+        if t == "user":
+            new_ev["permissionMode"] = permission_mode
+        else:
+            new_ev["requestId"] = ""
+        out.append(new_ev)
+        prev_uuid = new_ev["uuid"]
+
+    with open(dst_path, "w") as f:
+        for ev in out:
+            f.write(json.dumps(ev) + "\n")
+    return True
+
+
 def ensure_str(value):
     """Decode bytes to str if needed (handles blob columns from SQLite)."""
     if isinstance(value, bytes):
@@ -1907,22 +2009,22 @@ def drain_inbox(db):
 def find_subagent_log(agent_id):
     """Find the subagent's jsonl log file by agent ID.
 
-    Searches ~/.claude/projects/*/subagents/agent-{agentId}.jsonl.
+    Searches the live location under ~/.claude/projects/, then falls back
+    to the hardlinked backup under $PROJECT_DIR/sessions/subagents/ (which
+    --complete writes precisely because Claude Code may GC the original).
     Returns the path if found, None otherwise.
     """
     import glob
-    pattern = os.path.expanduser(
-        f"~/.claude/projects/*/subagents/agent-{agent_id}.jsonl"
-    )
-    matches = glob.glob(pattern)
-    if matches:
-        return matches[0]
-    # Also check one level deeper (session subdirectories)
-    pattern = os.path.expanduser(
-        f"~/.claude/projects/*/*/subagents/agent-{agent_id}.jsonl"
-    )
-    matches = glob.glob(pattern)
-    return matches[0] if matches else None
+    patterns = [
+        os.path.expanduser(f"~/.claude/projects/*/subagents/agent-{agent_id}.jsonl"),
+        os.path.expanduser(f"~/.claude/projects/*/*/subagents/agent-{agent_id}.jsonl"),
+        os.path.join(PROJECT_DIR, "sessions", "subagents", "*", f"agent-{agent_id}.jsonl"),
+    ]
+    for pattern in patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    return None
 
 
 def tail_task(db, name, verbosity=0, timestamps=False):
@@ -1981,7 +2083,7 @@ def tail_task(db, name, verbosity=0, timestamps=False):
         print("\n(stopped tailing)")
 
 
-def chat_task(db, name):
+def chat_task(db, name, model=None):
     """Open an interactive Claude session continuing a task's last agent run.
 
     Copies the subagent's jsonl log into a standalone session file
@@ -1992,8 +2094,19 @@ def chat_task(db, name):
     Preserving original sessionIds means cost_report can deduplicate:
     events whose sessionId doesn't match the filename are copied history
     and won't be double-counted.
+
+    If `model` is set, it's passed to `claude --resume` as `--model X`
+    (alias like 'opus' or full name like 'claude-opus-4-7'). Without it,
+    claude inherits the model from the most-recent assistant turn in the
+    JSONL, which can lock a resumed chat to a stale model version.
     """
     import uuid as _uuid
+
+    def claude_resume_argv(sid):
+        argv = [CLAUDE_BIN, "--resume", sid, "--dangerously-skip-permissions"]
+        if model:
+            argv.extend(["--model", model])
+        return argv
 
     task = db.execute("SELECT * FROM tasks WHERE name = ?", (name,)).fetchone()
     if task is None:
@@ -2017,10 +2130,39 @@ def chat_task(db, name):
             if os.path.exists(session_path):
                 print(f"Resuming old session {session_id}")
                 os.chdir(os.path.expanduser("~"))
-                os.execvp(CLAUDE_BIN, [CLAUDE_BIN, "--resume", session_id, "--dangerously-skip-permissions"])
-            else:
-                print(f"Error: session file not found: {session_path}")
-                return False
+                os.execvp(CLAUDE_BIN, claude_resume_argv(session_id))
+            # Parent session JSONL was GC'd by Claude Code (it isn't
+            # hardlinked the way subagent logs are). The conversation
+            # itself survives in the stream-json log — convert it.
+            if log_path and os.path.exists(log_path):
+                # Reuse an already-converted chat session for this run if present
+                chat_session_id = run["chat_session_id"]
+                if chat_session_id:
+                    chat_path = os.path.join(HOME_BUCKET_DIR, f"{chat_session_id}.jsonl")
+                    if os.path.exists(chat_path):
+                        print(f"Resuming existing chat session {chat_session_id}")
+                        os.chdir(os.path.expanduser("~"))
+                        os.execvp(CLAUDE_BIN, claude_resume_argv(chat_session_id))
+                import uuid as _uuid
+                agent_prompt_row = db.execute(
+                    "SELECT agent_prompt FROM runs WHERE id = ?", (run["id"],)
+                ).fetchone()
+                initial_prompt = agent_prompt_row["agent_prompt"] if agent_prompt_row else ""
+                new_session_id = str(_uuid.uuid4())
+                dst_path = os.path.join(HOME_BUCKET_DIR, f"{new_session_id}.jsonl")
+                if stream_json_to_session_jsonl(log_path, dst_path, initial_prompt):
+                    db.execute(
+                        "UPDATE runs SET chat_session_id = ? WHERE id = ?",
+                        (new_session_id, run["id"]),
+                    )
+                    db.commit()
+                    print(f"Original session {session_id} was GC'd by Claude Code.")
+                    print(f"Reconstructed chat session {new_session_id} from {os.path.basename(log_path)}")
+                    print(f"Launching claude --resume ...")
+                    os.chdir(os.path.expanduser("~"))
+                    os.execvp(CLAUDE_BIN, claude_resume_argv(new_session_id))
+            print(f"Error: session file not found: {session_path} (and no stream-json log to reconstruct from)")
+            return False
         print(f"Error: no agent_id or session_id for task '{name}'")
         return False
 
@@ -2031,7 +2173,7 @@ def chat_task(db, name):
         if os.path.exists(chat_path):
             print(f"Resuming existing chat session {chat_session_id}")
             os.chdir(os.path.expanduser("~"))
-            os.execvp(CLAUDE_BIN, [CLAUDE_BIN, "--resume", chat_session_id, "--dangerously-skip-permissions"])
+            os.execvp(CLAUDE_BIN, claude_resume_argv(chat_session_id))
         else:
             print(f"Warning: chat session file missing, creating new session")
 
@@ -2076,7 +2218,7 @@ def chat_task(db, name):
     print(f"Launching claude --resume ...")
 
     os.chdir(os.path.expanduser("~"))
-    os.execvp(CLAUDE_BIN, [CLAUDE_BIN, "--resume", new_session_id, "--dangerously-skip-permissions"])
+    os.execvp(CLAUDE_BIN, claude_resume_argv(new_session_id))
 
 
 def continue_task(db, name, prompt=None):
@@ -2403,6 +2545,7 @@ def main():
     parser.add_argument("--clear-inbox", action="store_true", dest="clear_inbox",
                         help="Delete all rows from the inbox table (including delivered history)")
     parser.add_argument("--chat", metavar="NAME", help="Interactive session continuing a task's last agent run")
+    parser.add_argument("--model", metavar="MODEL", help="Model alias or full name for --chat (e.g. 'opus', 'claude-opus-4-7')")
     parser.add_argument("--kill", metavar="NAME", help="Mark a running task as interrupted")
     parser.add_argument("--sync", metavar="NAME", help="Update task status from chat continuation results")
     parser.add_argument("--backup", action="store_true", help="Export sessions, commit changes, and push to backup remote")
@@ -2704,7 +2847,7 @@ def main():
     elif args.chat:
         name = resolve_task_name(db, args.chat)
         if name:
-            chat_task(db, name)
+            chat_task(db, name, model=args.model)
     elif args.kill:
         name = resolve_task_name(db, args.kill)
         if name:
