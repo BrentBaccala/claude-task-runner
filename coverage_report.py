@@ -145,9 +145,15 @@ def compaction_canonical(path: Path) -> str:
     return m.group(1) if m else base
 
 
+# Two tool-call rendering formats appear in task_runner.py --show -v:
+#   formal:  ● Write(file_path: "/path")
+#   compact: [write /path]
+# Both appear, sometimes in the same task. Capture file_path from either.
 _WRITE_TOOL_RE = re.compile(
     r'(?:Write|Edit|MultiEdit|NotebookEdit)\(\s*(?:file_path|notebook_path)'
     r'\s*:\s*"([^"]+)"'
+    r'|'
+    r'\[(?:write|edit|multiedit|notebookedit)\s+([^\]]+)\]'
 )
 
 
@@ -173,9 +179,9 @@ def probe_task_writes(task_id: int, candidate_basenames: set[str],
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return set()
     text = res.stdout + res.stderr
-    written_paths = _WRITE_TOOL_RE.findall(text)
     found: set[str] = set()
-    for path in written_paths:
+    for formal, compact in _WRITE_TOOL_RE.findall(text):
+        path = formal or compact
         for base in candidate_basenames:
             if base in path:
                 found.add(base)
