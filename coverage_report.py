@@ -30,11 +30,18 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
+
+SESSION_UUID_RE = re.compile(
+    r'\*\*Session\*\*:\s*'
+    r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})',
+    re.IGNORECASE,
+)
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 if SCRIPT_DIR not in sys.path:
@@ -107,26 +114,56 @@ def build_agent_to_parent_map() -> dict[str, str]:
 
 
 def build_canonical_to_filenames(filenames: set[str]) -> dict[str, set[str]]:
-    """Reverse map {canonical_sessionId: {filename_uuids that resolve here}}."""
+    """Reverse map {canonical_sessionId: {filename_uuids that resolve here}}.
+    Used for KG entries (uniform session-<UUID>.json convention)."""
     out: dict[str, set[str]] = defaultdict(set)
     for f in filenames:
         out[canonical_session_id(f)].add(f)
     return out
 
 
-def probe_task_writes(task_id: int, candidate_uuids: set[str],
-                      task_runner_bin: str = "task_runner.py") -> set[str]:
-    """Run `task_runner.py --show <id> -v` and return the candidate UUIDs
-    found in the verbose output.
+def compaction_canonical(path: Path) -> str:
+    """Resolve a compaction file's canonical session UUID.
 
-    The verbose output includes per-tool tool-use records like
-        ● Write(file_path: "/.../session-<UUID>.md")
-        ● Bash(command: "touch -d @... /.../session-<UUID>.md")
-        ● Bash(command: "git add compactions/session-<UUID>.md ...")
-    Any of those substring-matches the UUID, so a literal `in` test is
-    enough — we don't need to parse tool-call structure.
+    Two filename conventions live in compactions/:
+      session-<UUID>.md       (modern /end skill) — UUID dereferenced
+                              via the matching JSONL's first-event sessionId
+      DDMonYYYY-HHMM.md       (older /compaction skill) — body's
+                              `**Session**: <UUID>` line is the canonical id
+
+    Falls back to the basename if no canonical UUID can be derived
+    (some older compactions have no Session line).
     """
-    if not candidate_uuids:
+    base = path.stem
+    if base.startswith("session-"):
+        return canonical_session_id(base.removeprefix("session-"))
+    try:
+        head = path.read_text(errors="replace")[:4000]
+    except Exception:
+        return base
+    m = SESSION_UUID_RE.search(head)
+    return m.group(1) if m else base
+
+
+_WRITE_TOOL_RE = re.compile(
+    r'(?:Write|Edit|MultiEdit|NotebookEdit)\(\s*(?:file_path|notebook_path)'
+    r'\s*:\s*"([^"]+)"'
+)
+
+
+def probe_task_writes(task_id: int, candidate_basenames: set[str],
+                      task_runner_bin: str = "task_runner.py") -> set[str]:
+    """Run `task_runner.py --show <id> -v`, extract Write/Edit tool-call
+    file_path arguments, and return the candidate basenames found in any
+    of them.
+
+    Strict: only tool-use Write/Edit/MultiEdit/NotebookEdit calls count.
+    Mentions in committed_files listings (`A compactions/...`) or in
+    narrative prose don't — those don't prove this run wrote the file
+    (a sibling subagent under the same orchestrator may have, with the
+    parent's commit step sweeping it up).
+    """
+    if not candidate_basenames:
         return set()
     try:
         res = subprocess.run(
@@ -136,7 +173,13 @@ def probe_task_writes(task_id: int, candidate_uuids: set[str],
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return set()
     text = res.stdout + res.stderr
-    return {u for u in candidate_uuids if u in text}
+    written_paths = _WRITE_TOOL_RE.findall(text)
+    found: set[str] = set()
+    for path in written_paths:
+        for base in candidate_basenames:
+            if base in path:
+                found.add(base)
+    return found
 
 
 def build_artifact_sets(dirs: list[Path], pattern: str) -> tuple[set[str], set[str]]:
@@ -163,8 +206,35 @@ def build_artifact_sets(dirs: list[Path], pattern: str) -> tuple[set[str], set[s
     return filenames, canonical
 
 
-def build_compaction_sets() -> tuple[set[str], set[str]]:
-    return build_artifact_sets([COMPACTIONS_DIR], "session-*.md")
+def build_compaction_sets() -> tuple[set[str], set[str], dict[str, set[str]]]:
+    """Returns (filename_uuids, canonical_ids, canonical_to_basenames).
+
+    filename_uuids: bare UUIDs from session-<UUID>.md filenames (no
+        'session-' prefix). Used for chat_session_id direct-attribution
+        matching. Older DDMonYYYY-HHMM.md files contribute nothing here
+        — there's no UUID in their filename to pin a chat_session_id to.
+
+    canonical_ids: per-file canonical session UUID, regardless of
+        filename convention. Modern files dereference via JSONL first
+        event; older files parse `**Session**: <UUID>` from the body.
+        Used for parent-shared coverage matching.
+
+    canonical_to_basenames: reverse map {canonical_id -> {full basenames}}.
+        Used by the probe — greps the verbose run output for these
+        strings, which match Write tool-use lines verbatim.
+    """
+    if not COMPACTIONS_DIR.is_dir():
+        return set(), set(), {}
+    filename_uuids: set[str] = set()
+    canonical: set[str] = set()
+    rev: dict[str, set[str]] = defaultdict(set)
+    for f in COMPACTIONS_DIR.glob("*.md"):
+        cid = compaction_canonical(f)
+        canonical.add(cid)
+        rev[cid].add(f.stem)
+        if f.stem.startswith("session-"):
+            filename_uuids.add(f.stem.removeprefix("session-"))
+    return filename_uuids, canonical, rev
 
 
 def build_kg_sets() -> tuple[set[str], set[str]]:
@@ -274,9 +344,8 @@ def main():
     conn.row_factory = sqlite3.Row
 
     agent_to_parent = build_agent_to_parent_map()
-    comp_filenames, comp_canonical = build_compaction_sets()
+    comp_filenames, comp_canonical, comp_canon_to_files = build_compaction_sets()
     kg_filenames, kg_canonical = build_kg_sets()
-    comp_canon_to_files = build_canonical_to_filenames(comp_filenames)
     kg_canon_to_files = build_canonical_to_filenames(kg_filenames)
     runs_by_task = load_task_runs(conn)
 
